@@ -1,4 +1,12 @@
-import type { Context, Message, Tool } from "@earendil-works/pi-ai";
+import {
+  type Message,
+  type Tool,
+  type TranscriptContext,
+  collapseSystemMessages,
+  getCurrentSystemPrompt,
+  getCurrentTools,
+  withoutInitialSystemMessage,
+} from "@earendil-works/pi-ai";
 import { unpackThinkingSignature, type ChatThinking } from "./thinking.js";
 
 export interface ContentPart {
@@ -44,10 +52,18 @@ function userContent(content: Message["content"]): string | ContentPart[] {
   return parts;
 }
 
-export function mapContextToChat(context: Context): MappedChat {
+export function mapContextToChat(context: TranscriptContext): MappedChat {
   const messages: ChatHistoryItem[] = [];
 
-  for (const message of context.messages) {
+  // The prompt and the tool declarations live in the transcript's system
+  // messages. Collapse them into one leading system message, read the current
+  // state from it, then map the conversation without it: the wire carries the
+  // prompt in its own slot and the tools in their own field.
+  const transcript = collapseSystemMessages(context);
+  const systemPrompt = getCurrentSystemPrompt(transcript.messages);
+  const currentTools = getCurrentTools(transcript.messages);
+
+  for (const message of withoutInitialSystemMessage(transcript.messages)) {
     if (message.role === "user") {
       messages.push({ role: "user", content: userContent(message.content) });
       continue;
@@ -103,11 +119,11 @@ export function mapContextToChat(context: Context): MappedChat {
     }
   }
 
-  const tools: ToolDef[] = (context.tools ?? []).map((tool: Tool) => ({
+  const tools: ToolDef[] = currentTools.map((tool: Tool) => ({
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
   }));
 
-  return { systemPrompt: context.systemPrompt || undefined, messages, tools };
+  return { systemPrompt: systemPrompt || undefined, messages, tools };
 }

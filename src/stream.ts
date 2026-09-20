@@ -4,9 +4,9 @@ import {
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
-  type Context,
   type Model,
   type SimpleStreamOptions,
+  type TranscriptContext,
   calculateCost,
   createAssistantMessageEventStream,
 } from "@earendil-works/pi-ai";
@@ -418,7 +418,7 @@ async function* streamChatEvents(args: {
 
 export function streamDevin(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
