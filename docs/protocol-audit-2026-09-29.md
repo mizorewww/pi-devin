@@ -59,13 +59,17 @@ The final suite has 56 tests: 53 passed on macOS and three Windows-only tests sk
 Automated regression coverage additionally exercises cancellation, a real HTTP socket
 closing mid-stream, idle timeout, EOS without connection close, tool JSON truncation,
 interleaved calls, catalog cache behavior, SQLite logout, signature replay, usage,
-request configuration, and session isolation. Windows-specific tests require Windows CI.
+request configuration, and session isolation. After publishing, the release commit also
+passed all six GitHub Actions jobs: Ubuntu, macOS and Windows, each on Node 22 and 24.
+The Windows jobs executed the platform-specific CLI tests.
+[Release CI results](https://github.com/mizorewww/pi-devin/actions/runs/36531664471).
 
 ## Stability assessment and limits
 
 The tested text/tool paths work against the current service and installed client.
 That is evidence of current compatibility, not long-duration reliability or coverage of
-all 53 families. No load test, Windows execution, or exhaustive model matrix was run.
+all 53 families. No load test or exhaustive model matrix was run. Real-service probes were run on macOS;
+Windows and Linux were validated through the automated CI suite.
 
 - GetChatMessage is a private, reverse-engineered protocol. Server changes can break
   field semantics, client version gates, authentication or model routing without notice.
