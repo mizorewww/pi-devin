@@ -6,7 +6,7 @@
 
 Pi 仍然是 harness。[Devin CLI](https://docs.devin.ai/cli) 负责登录与实时模型目录（`devin auth`、`devin models list`）。这不是 ACP 集成，也不依赖 Zed。
 
-> 这是 [`kashyab12/pi-devin`](https://github.com/kashyab12/pi-devin)（npm 上的 `pi-devin`）的 fork，带了上游尚未合并的修复 —— 见[本 fork 改了什么](#本-fork-改了什么)。两者**不能同时安装**：它们注册的是同一个 `devin` provider。
+> 这是 [`kashyab12/pi-devin`](https://github.com/kashyab12/pi-devin)（npm 上的 `pi-devin`）的 fork，包含额外的修复和功能 —— 见[本 fork 改了什么](#本-fork-改了什么)。两者**不能同时安装**：它们注册的是同一个 `devin` provider。
 
 ## 为什么会有这个包
 
@@ -20,9 +20,9 @@ This model is only in Devin Local.
 
 ## 环境要求
 
-- Pi Coding Agent 0.80+
+- Pi Coding Agent 0.86+
 - 已登录的 [Devin CLI](https://docs.devin.ai/cli)（`devin auth status`），或已登录的 Devin Desktop
-- Node 18+
+- Node 22.19+（Pi 0.86 的要求）
 
 CLI 可执行文件的查找顺序：
 
@@ -30,6 +30,8 @@ CLI 可执行文件的查找顺序：
 2. `~/.local/bin/devin`、Homebrew、`/usr/local/bin/devin`
 3. Devin.app 内置的 `devin` 二进制
 4. `which devin`
+
+Windows 上会检查 CLI 安装器和 Devin Desktop 的安装路径，然后使用 `where.exe` 搜索 PATH。支持原生可执行文件和 `.cmd` / `.bat` 包装脚本，包括带空格的路径。所有平台都优先使用 `DEVIN_CLI`。
 
 ## 安装
 
@@ -53,7 +55,7 @@ pi install ~/Developers/pi-devin
 
 装完重启 Pi，或执行 `/reload`。
 
-上游包是 `npm:pi-devin`，它不含本 fork 的修复，且不能与本包同时安装。
+上游包是 `npm:pi-devin`。两者只能安装一个：它们注册的是同一个 `devin` provider。
 
 ## 使用
 
@@ -82,6 +84,8 @@ pi install ~/Developers/pi-devin
 
 - `/devin-status` — CLI 路径、版本、认证状态
 - `/devin-refresh` — 重新执行 `devin models list --format json` 拉取目录
+
+模型目录缓存有效期为六小时，存放在 `$XDG_CACHE_HOME/pi-devin/models.json`（默认是 `~/.cache/pi-devin/models.json`）。缓存未过期时启动无需调用 CLI；过期后会先使用缓存，再在后台刷新。设置 `PI_OFFLINE=1` 可跳过自动刷新；`/devin-refresh` 仍可手动刷新。
 
 ## 这个包是 / 不是什么
 

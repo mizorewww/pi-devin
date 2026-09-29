@@ -4,11 +4,12 @@ import {
   type Api,
   type AssistantMessage,
   type AssistantMessageEventStream,
-  type Context,
   type Model,
   type SimpleStreamOptions,
+  type TranscriptContext,
   calculateCost,
   createAssistantMessageEventStream,
+  parseStreamingJson,
 } from "@earendil-works/pi-ai";
 import { mapContextToChat, type ChatHistoryItem, type ContentPart, type ToolDef } from "./context-map.js";
 import { getCachedUserJwt } from "./jwt.js";
@@ -24,7 +25,7 @@ import {
   iterFields,
 } from "./wire.js";
 
-const SOURCE_BY_ROLE: Record<string, number> = {
+const SOURCE_BY_ROLE: Record<ChatHistoryItem["role"], number> = {
   user: 1,
   assistant: 2,
   tool: 4,
@@ -153,7 +154,7 @@ function buildGetChatMessageRequest(args: {
   const prompts = args.messages.map((message) =>
     encodeMessage(
       3,
-      encodeChatMessagePrompt(normalizeContent(message.content), SOURCE_BY_ROLE[message.role] ?? 1, {
+      encodeChatMessagePrompt(normalizeContent(message.content), SOURCE_BY_ROLE[message.role], {
         toolCallId: message.role === "tool" ? message.tool_call_id : undefined,
         toolCalls: message.role === "assistant" ? message.tool_calls : undefined,
         thinking: message.role === "assistant" ? message.thinking : undefined,
@@ -253,12 +254,12 @@ function decodeUsage(buf: Buffer): CloudChatEvent | null {
     else if (metric.includes("cached") || metric.includes("cache_read")) cachedInputTokens = n;
     else if (metric.includes("cache_creation")) cacheCreationInputTokens = n;
   }
-  if (promptTokens === undefined && completionTokens === undefined) return null;
+  if ([promptTokens, completionTokens, cachedInputTokens, cacheCreationInputTokens].every((n) => n === undefined)) return null;
   return {
     kind: "usage",
     promptTokens,
     completionTokens,
-    totalTokens: (promptTokens ?? 0) + (completionTokens ?? 0),
+    totalTokens: (promptTokens ?? 0) + (completionTokens ?? 0) + (cachedInputTokens ?? 0) + (cacheCreationInputTokens ?? 0),
     cachedInputTokens,
     cacheCreationInputTokens,
   };
@@ -418,7 +419,7 @@ async function* streamChatEvents(args: {
 
 export function streamDevin(
   model: Model<Api>,
-  context: Context,
+  context: TranscriptContext,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
@@ -472,11 +473,7 @@ export function streamDevin(
       if (toolIndex < 0) return;
       const block = output.content[toolIndex];
       if (block.type === "toolCall") {
-        try {
-          block.arguments = JSON.parse(partialJson);
-        } catch {
-          // keep last parsed object
-        }
+        block.arguments = parseStreamingJson(partialJson);
         stream.push({
           type: "toolcall_end",
           contentIndex: toolIndex,
@@ -555,11 +552,7 @@ export function streamDevin(
           partialJson += event.argsDelta;
           const block = output.content[toolIndex];
           if (block.type === "toolCall") {
-            try {
-              block.arguments = JSON.parse(partialJson);
-            } catch {
-              // incomplete json
-            }
+            block.arguments = parseStreamingJson(partialJson);
           }
           stream.push({ type: "toolcall_delta", contentIndex: toolIndex, delta: event.argsDelta, partial: output });
         } else if (event.kind === "finish") {
@@ -569,11 +562,14 @@ export function streamDevin(
           output.stopReason =
             event.reason === "tool_calls" ? "toolUse" : event.reason === "length" ? "length" : "stop";
         } else if (event.kind === "usage") {
-          output.usage.input = event.promptTokens ?? 0;
-          output.usage.output = event.completionTokens ?? 0;
-          output.usage.cacheRead = event.cachedInputTokens ?? 0;
-          output.usage.cacheWrite = event.cacheCreationInputTokens ?? 0;
-          output.usage.totalTokens = event.totalTokens ?? output.usage.input + output.usage.output;
+          // Empty trailers must not erase usage already received. Metrics are
+          // snapshots, and a frame may contain only some of the components.
+          if (!event.totalTokens) continue;
+          output.usage.input = event.promptTokens ?? output.usage.input;
+          output.usage.output = event.completionTokens ?? output.usage.output;
+          output.usage.cacheRead = event.cachedInputTokens ?? output.usage.cacheRead;
+          output.usage.cacheWrite = event.cacheCreationInputTokens ?? output.usage.cacheWrite;
+          output.usage.totalTokens = output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
           calculateCost(model, output.usage);
         }
       }

@@ -6,7 +6,7 @@ A [Pi](https://pi.dev) package that uses **Devin Local** models inside Pi.
 
 Pi stays the harness. The [Devin CLI](https://docs.devin.ai/cli) owns login and the live model catalog (`devin auth`, `devin models list`). This is not an ACP integration and does not use Zed.
 
-> Fork of [`kashyab12/pi-devin`](https://github.com/kashyab12/pi-devin) (npm `pi-devin`) with fixes that upstream does not carry yet — see [What this fork changes](#what-this-fork-changes). Do not install both: they register the same `devin` provider.
+> Fork of [`kashyab12/pi-devin`](https://github.com/kashyab12/pi-devin) (npm `pi-devin`) with additional fixes and features — see [What this fork changes](#what-this-fork-changes). Do not install both: they register the same `devin` provider.
 
 ## Why this exists
 
@@ -20,9 +20,9 @@ Those models are available through the local Devin CLI. This package uses that C
 
 ## Requirements
 
-- Pi Coding Agent 0.80+
+- Pi Coding Agent 0.86+
 - A signed-in [Devin CLI](https://docs.devin.ai/cli) (`devin auth status`), or a signed-in Devin Desktop
-- Node 18+
+- Node 22.19+ (required by Pi 0.86)
 
 The CLI binary is resolved in this order:
 
@@ -30,6 +30,8 @@ The CLI binary is resolved in this order:
 2. `~/.local/bin/devin`, Homebrew, `/usr/local/bin/devin`
 3. Devin.app's bundled `devin` binary
 4. `which devin`
+
+On Windows, discovery checks the CLI installer and Devin Desktop locations, then uses `where.exe` to search PATH. Native executables and `.cmd`/`.bat` wrappers are supported, including paths with spaces. `DEVIN_CLI` takes precedence on every platform.
 
 ## Install
 
@@ -53,7 +55,7 @@ pi install ~/Developers/pi-devin
 
 Restart Pi or run `/reload`. The Chinese README is at [README_zh.md](README_zh.md) (named without a dot so npm keeps English as the package page default).
 
-Upstream is `npm:pi-devin`; it does not carry this fork's fixes and must not be installed alongside this one.
+Upstream is `npm:pi-devin`. Install only one package: both register the same `devin` provider.
 
 ## Usage
 
@@ -90,6 +92,8 @@ Commands:
 
 - `/devin-status` — CLI path, version, auth
 - `/devin-refresh` — reload `devin models list --format json`
+
+The model catalog is cached for six hours in `$XDG_CACHE_HOME/pi-devin/models.json` (or `~/.cache/pi-devin/models.json`). A fresh cache avoids the CLI call at startup; an older cache remains available while it refreshes in the background. Set `PI_OFFLINE=1` to skip automatic catalog refreshes. `/devin-refresh` still requests a refresh explicitly.
 
 ## What this is / is not
 
