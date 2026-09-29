@@ -121,6 +121,11 @@ Everything upstream does, plus:
 - **Request shape aligned with the Devin CLI.** System prompt in the server's
   system slot, matching sampling configuration, trajectory reference and planner
   mode, no stray `execution_id`.
+- **Pi payload hooks.** `onPayload` receives the chat request before protobuf
+  encoding: `system`, `messages`, `tools`, `modelUid` and `maxOutputTokens`, without
+  authentication or transport metadata. Image parts use Pi's `data`/`mimeType`
+  shape. Async inspection, in-place edits and returned replacement payloads are
+  supported, so `before_provider_request` extensions can observe real requests.
 
 ## 0.3.0 compatibility and validation
 

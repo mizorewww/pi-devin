@@ -65,6 +65,85 @@ async function complete(context, options = {}) {
   return stream.result();
 }
 
+test("observes the encoded prompt, tools and images before adding transport credentials", async (t) => {
+  const requests = mockDevin(t);
+  const image = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
+  const context = normalizeContext({
+    systemPrompt: "Observe this prompt.",
+    tools: [{ ...readTool, description: "d".repeat(7_000) }],
+    messages: [user([{ type: "text", text: "Inspect this image." }, image])],
+  });
+  const before = structuredClone(context);
+  let observed;
+  await complete(context, {
+    onPayload: (payload, selectedModel) => {
+      assert.equal(selectedModel, model);
+      assert.equal(requests.length, 0);
+      observed = structuredClone(payload);
+    },
+  });
+  assert.ok(observed, "provider must call Pi's payload hook");
+  assert.deepEqual(Object.keys(observed).sort(), ["maxOutputTokens", "messages", "modelUid", "system", "tools"]);
+  assert.equal(observed.system, stringField(requests[0], 2));
+  assert.equal(observed.tools[0].description, stringField(fields(requests[0].find((field) => field.num === 10).value), 2));
+  assert.equal(observed.tools[0].description.length, 6_998);
+  assert.deepEqual(observed.messages[0].content[1], image);
+  assert.equal(observed.messages[0].content[1].data, stringField(fields(messages(requests[0])[0].find((field) => field.num === 10).value), 1));
+  assert.equal(observed.modelUid, stringField(requests[0], 21));
+  assert.equal(observed.maxOutputTokens, model.maxTokens);
+  assert.deepEqual(context, before, "mapping and inspection must not rewrite the transcript");
+});
+
+test("awaits an asynchronous payload replacement and encodes it as the request", async (t) => {
+  const requests = mockDevin(t);
+  await complete(normalizeContext({ systemPrompt: "Original", tools: [readTool], messages: [user("Original user")] }), {
+    onPayload: async (payload) => ({
+      ...payload,
+      system: "Replaced system",
+      messages: [{ role: "user", content: "Replaced user" }],
+      tools: [{ ...readTool, name: "inspect", description: "Replaced tool" }],
+      modelUid: "replacement-model",
+      maxOutputTokens: 77,
+    }),
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(stringField(requests[0], 2), "Replaced system");
+  assert.deepEqual(messages(requests[0]).map((message) => stringField(message, 3)), ["Replaced user"]);
+  assert.equal(stringField(fields(requests[0].find((field) => field.num === 10).value), 1), "inspect");
+  assert.equal(stringField(requests[0], 21), "replacement-model");
+  assert.equal(fields(requests[0].find((field) => field.num === 8).value).find((field) => field.num === 2).value, 77n);
+});
+
+test("preserves in-place payload edits when the hook returns undefined", async (t) => {
+  const requests = mockDevin(t);
+  await complete(normalizeContext({ messages: [user("Original")] }), {
+    onPayload: async (payload) => {
+      await Promise.resolve();
+      payload.messages[0].content = "Edited in place";
+    },
+  });
+  assert.equal(stringField(messages(requests[0])[0], 3), "Edited in place");
+});
+
+for (const mode of ["throw", "abort"]) {
+  test(`a payload hook ${mode} prevents authentication and chat requests`, async (t) => {
+    const fetch = t.mock.method(globalThis, "fetch", async () => { throw new Error("Unexpected request"); });
+    const controller = new AbortController();
+    const stream = streamDevin(model, normalizeContext({ messages: [user("Hello")] }), {
+      apiKey: "synthetic-test-key",
+      signal: controller.signal,
+      onPayload: async () => {
+        if (mode === "throw") throw new Error("Payload hook failed");
+        controller.abort();
+      },
+    });
+    const result = await stream.result();
+    assert.equal(fetch.mock.callCount(), 0);
+    assert.equal(result.stopReason, mode === "throw" ? "error" : "aborted");
+    if (mode === "throw") assert.match(result.errorMessage, /Payload hook failed/);
+  });
+}
+
 // #7: verify the normalized transcript survives the complete request-encoding path.
 test("encodes the current system prompt once in field 2, with unchanged user text and images", async (t) => {
   const requests = mockDevin(t);

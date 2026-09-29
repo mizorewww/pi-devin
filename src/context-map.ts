@@ -13,7 +13,7 @@ export interface ContentPart {
   type: "text" | "image";
   text?: string;
   mimeType?: string;
-  base64Data?: string;
+  data?: string;
 }
 
 export interface ChatHistoryItem {
@@ -47,7 +47,7 @@ function userContent(content: Message["content"]): string | ContentPart[] {
     if (!part || typeof part !== "object") continue;
     if (part.type === "text") parts.push({ type: "text", text: part.text });
     if (part.type === "image") {
-      parts.push({ type: "image", mimeType: part.mimeType, base64Data: part.data });
+      parts.push({ type: "image", mimeType: part.mimeType, data: part.data });
     }
   }
   return parts;
@@ -111,7 +111,7 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
 
   const tools: ToolDef[] = getCurrentTools(transcript.messages).map((tool: Tool) => ({
     name: tool.name,
-    description: tool.description,
+    description: tool.description.length > 6_998 ? `${tool.description.slice(0, 6_995)}...` : tool.description,
     parameters: tool.parameters,
   }));
 

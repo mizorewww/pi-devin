@@ -104,6 +104,7 @@ pi install ~/Developers/pi-devin
 - **每个 family 一个模型，思考档位交给 Pi。** `devin/swe-2` + `/thinking max` 会发送 `swe-2-max`；该 family 没有的档位会被隐藏，而不是悄悄回退到默认 variant。
 - **思维链完整往返。** 服务端下发的思考摘要、sealed 签名和 redacted 标记都会保存在 thinking block 上，并在下一次请求中回传（与 Devin CLI 一致），模型因此能保留自己此前的推理。
 - **请求形状与 Devin CLI 对齐。** 系统提示放在服务端的 system 槽位，采样配置、trajectory reference、planner mode 均对齐，并移除了多余的 `execution_id`。
+- **支持 Pi 请求钩子。** `onPayload` 接收 protobuf 编码前的请求：`system`、`messages`、`tools`、`modelUid` 和 `maxOutputTokens`，不包含认证及传输元数据。图片沿用 Pi 的 `data`/`mimeType` 格式。支持异步观察、原地修改及返回替换 payload，`before_provider_request` 扩展因此可以观察实际请求。
 
 ## 0.3.0 兼容性与验证
 

@@ -31,6 +31,15 @@ const SOURCE_BY_ROLE: Record<ChatHistoryItem["role"], number> = {
   tool: 4,
 };
 
+/** The chat request before protobuf encoding and transport metadata are added. */
+export interface DevinPayload {
+  system?: string;
+  messages: ChatHistoryItem[];
+  tools: ToolDef[];
+  modelUid: string;
+  maxOutputTokens: number;
+}
+
 export type CloudChatEvent =
   | { kind: "text"; text: string }
   | { kind: "reasoning"; text: string }
@@ -53,9 +62,9 @@ function normalizeContent(content: string | ContentPart[]): ContentPart[] {
   return content;
 }
 
-function encodeImageData(img: { mimeType?: string; base64Data?: string }): Buffer {
+function encodeImageData(img: { mimeType?: string; data?: string }): Buffer {
   return Buffer.concat([
-    encodeString(1, img.base64Data ?? ""),
+    encodeString(1, img.data ?? ""),
     encodeString(2, img.mimeType ?? "image/png"),
   ]);
 }
@@ -124,10 +133,9 @@ function encodeTrajectoryReference(trajectoryId: string): Buffer {
 }
 
 function encodeToolDef(tool: ToolDef): Buffer {
-  const description = tool.description.length > 6_998 ? `${tool.description.slice(0, 6_995)}...` : tool.description;
   return Buffer.concat([
     encodeString(1, tool.name),
-    encodeString(2, description),
+    encodeString(2, tool.description),
     encodeString(3, JSON.stringify(tool.parameters ?? {})),
   ]);
 }
@@ -135,17 +143,14 @@ function encodeToolDef(tool: ToolDef): Buffer {
 function buildGetChatMessageRequest(args: {
   apiKey: string;
   userJwt: string;
-  modelUid: string;
-  systemPrompt?: string;
-  messages: ChatHistoryItem[];
-  tools?: ToolDef[];
+  payload: DevinPayload;
   cascadeId: string;
   trajectoryId: string;
   sessionId: string;
   requestId: bigint;
   triggerId: string;
-  maxOutputTokens?: number;
 }): Buffer {
+  const { payload } = args;
   const metadata = buildMetadata({
     apiKey: args.apiKey,
     userJwt: args.userJwt,
@@ -153,7 +158,7 @@ function buildGetChatMessageRequest(args: {
     requestId: args.requestId,
     triggerId: args.triggerId,
   });
-  const prompts = args.messages.map((message) =>
+  const prompts = payload.messages.map((message) =>
     encodeMessage(
       3,
       encodeChatMessagePrompt(normalizeContent(message.content), SOURCE_BY_ROLE[message.role], {
@@ -168,15 +173,15 @@ function buildGetChatMessageRequest(args: {
     encodeMessage(1, metadata),
     // 2 prompt — the server's system slot, same place the Devin CLI puts its own
     // system prompt. Collapsing it into the first user turn is not equivalent.
-    ...(args.systemPrompt ? [encodeString(2, args.systemPrompt)] : []),
+    ...(payload.system ? [encodeString(2, payload.system)] : []),
     ...prompts,
     encodeVarintField(7, 5),
-    encodeMessage(8, encodeCompletionConfiguration(args.maxOutputTokens)),
-    ...(args.tools ?? []).map((tool) => encodeMessage(10, encodeToolDef(tool))),
+    encodeMessage(8, encodeCompletionConfiguration(payload.maxOutputTokens)),
+    ...payload.tools.map((tool) => encodeMessage(10, encodeToolDef(tool))),
     encodeMessage(15, encodeTrajectoryReference(args.trajectoryId)),
     encodeString(16, args.cascadeId),
     encodeVarintField(20, 1),
-    encodeString(21, args.modelUid),
+    encodeString(21, payload.modelUid),
   ]);
 }
 
@@ -298,11 +303,7 @@ function sessionIds(apiKey: string, host: string, sessionId?: string) {
 async function* streamChatEvents(args: {
   apiKey: string;
   host: string;
-  modelUid: string;
-  systemPrompt?: string;
-  messages: ChatHistoryItem[];
-  tools?: ToolDef[];
-  maxOutputTokens?: number;
+  payload: DevinPayload;
   signal?: AbortSignal;
   sessionId?: string;
 }): AsyncGenerator<CloudChatEvent> {
@@ -312,16 +313,12 @@ async function* streamChatEvents(args: {
   const proto = buildGetChatMessageRequest({
     apiKey: args.apiKey,
     userJwt,
-    modelUid: args.modelUid,
-    systemPrompt: args.systemPrompt,
-    messages: args.messages,
-    tools: args.tools,
+    payload: args.payload,
     cascadeId: ids.cascadeId,
     trajectoryId: ids.trajectoryId,
     sessionId: ids.sessionId,
     requestId: BigInt(Date.now()),
     triggerId: randomUUID(),
-    maxOutputTokens: args.maxOutputTokens,
   });
 
   const resp = await fetch(`${host}/exa.api_server_pb.ApiServerService/GetChatMessage`, {
@@ -511,16 +508,22 @@ export function streamDevin(
       const host = (options?.env?.DEVIN_API_SERVER_URL || "https://server.codeium.com").replace(/\/$/, "");
       const modelUid = resolveModelUid(model.id, model.thinkingLevelMap, options?.reasoning);
       const mapped = mapContextToChat(context, model.id);
+      let payload: DevinPayload = {
+        system: mapped.systemPrompt,
+        messages: mapped.messages,
+        tools: mapped.tools,
+        modelUid,
+        maxOutputTokens: Math.min(options?.maxTokens ?? model.maxTokens, model.maxTokens),
+      };
+      const replacement = await options?.onPayload?.(payload, model);
+      if (replacement !== undefined) payload = replacement as DevinPayload;
+      signal.throwIfAborted();
       stream.push({ type: "start", partial: output });
 
       for await (const event of streamChatEvents({
         apiKey,
         host,
-        modelUid,
-        systemPrompt: mapped.systemPrompt,
-        messages: mapped.messages,
-        tools: mapped.tools.length > 0 ? mapped.tools : undefined,
-        maxOutputTokens: Math.min(options?.maxTokens ?? model.maxTokens, model.maxTokens),
+        payload,
         signal,
         sessionId: options?.sessionId,
       })) {
