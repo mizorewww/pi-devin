@@ -28,21 +28,21 @@ export interface DevinCatalog {
 const THINKING_ORDER = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 function parseCost(summary?: string): ProviderModelConfig["cost"] {
-  const empty = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  if (!summary) return empty;
-  const input = summary.match(/\$([0-9.]+)\s*\/\s*MTok In/i);
-  const output = summary.match(/\$([0-9.]+)\s*\/\s*MTok Out/i);
-  const inCost = input ? Number(input[1]) : 0;
-  const outCost = output ? Number(output[1]) : 0;
-  return {
-    input: inCost,
-    output: outCost,
-    cacheRead: Number((inCost * 0.1).toFixed(4)),
-    cacheWrite: Number((inCost * 1.25).toFixed(4)),
-  };
+  const rates = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  if (!summary) return rates;
+  // CLI releases use both "$5/MTok In" and "$5 / 1M Input".
+  for (const match of summary.matchAll(/\$([0-9]+(?:\.[0-9]+)?)\s*\/\s*(?:MTok|1M)\s+(Cached input|Cache read|Cache write|Cache creation|Input|Output|In|Out)\b/gi)) {
+    const kind = match[2].toLowerCase();
+    const key = kind.startsWith("cached") || kind === "cache read" ? "cacheRead"
+      : kind.startsWith("cache") ? "cacheWrite" : kind.startsWith("out") ? "output" : "input";
+    rates[key] = Number(match[1]);
+  }
+  // Do not invent provider-specific cache multipliers when the CLI omits them.
+  return rates;
 }
 
 function variantKey(uid: string): string | null {
+  uid = uid.toLowerCase().replaceAll("_", "-");
   const suffixes = [
     "none-priority",
     "low-priority",
@@ -72,7 +72,7 @@ function variantKey(uid: string): string | null {
 }
 
 function thinkingFromSuffix(suffix: string | null): keyof ThinkingLevelMap | null {
-  if (!suffix) return "high";
+  if (!suffix) return null;
   if (suffix === "none" || suffix === "none-priority") return "off";
   if (suffix === "minimal") return "minimal";
   if (suffix.startsWith("low")) return "low";
@@ -100,7 +100,10 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
   const source = usable.length > 0 ? usable : family.variants;
   const thinkingLevelMap: ThinkingLevelMap = {};
   for (const variant of source) {
-    const level = thinkingFromSuffix(variantKey(variant.model_uid));
+    // Legacy MODEL_PRIVATE_* IDs carry no effort; use the CLI label too.
+    const labelLevel = variant.label.match(/\b(none|off|minimal|low|medium|high|x-?high|max)\b(?:\s+(?:thinking|fast))?$/i)?.[1]?.toLowerCase().replace("x-high", "xhigh");
+    const level = thinkingFromSuffix(labelLevel === "off" ? "none" : labelLevel ?? variantKey(variant.model_uid))
+      ?? (/no thinking/i.test(variant.label) ? "off" : /thinking/i.test(variant.label) ? "high" : "off");
     if (level && thinkingLevelMap[level] === undefined) {
       thinkingLevelMap[level] = variant.model_uid;
     }
@@ -117,7 +120,7 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
   if (!sample) return [];
 
   const mappedLevels = THINKING_ORDER.filter((level) => typeof thinkingLevelMap[level] === "string");
-  const reasoning = mappedLevels.length > 1;
+  const reasoning = mappedLevels.some((level) => level !== "off");
 
   // With a thinking map the pi-facing id never reaches the wire — resolveModelUid
   // always maps it — so keep the family id and let pi's thinking level choose the
@@ -126,10 +129,10 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
 
   return [
     {
-      id: reasoning ? familyId : defaultUid,
+      id: familyId,
       name: family.family_label || family.slug || defaultUid,
       reasoning,
-      thinkingLevelMap: reasoning ? thinkingLevelMap : undefined,
+      thinkingLevelMap,
       input: ["text", "image"],
       cost: parseCost(sample.cost_summary),
       contextWindow: sample.max_context_tokens ?? 256_000,
@@ -138,85 +141,11 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
   ];
 }
 
-export const FALLBACK_MODELS: ProviderModelConfig[] = [
-  {
-    id: "claude-opus-5",
-    name: "Claude Opus 5",
-    reasoning: true,
-    thinkingLevelMap: {
-      off: null,
-      minimal: null,
-      low: "claude-opus-5-low",
-      medium: "claude-opus-5-medium",
-      high: "claude-opus-5-high",
-      xhigh: "claude-opus-5-xhigh",
-      max: "claude-opus-5-max",
-    },
-    input: ["text", "image"],
-    cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-    contextWindow: 1_000_000,
-    maxTokens: 128_000,
-  },
-  {
-    id: "claude-fable-5",
-    name: "Claude Fable 5",
-    reasoning: true,
-    thinkingLevelMap: {
-      off: null,
-      minimal: null,
-      low: "claude-5-fable-low",
-      medium: "claude-5-fable-medium",
-      high: "claude-5-fable-high",
-      xhigh: "claude-5-fable-xhigh",
-      max: "claude-5-fable-max",
-    },
-    input: ["text", "image"],
-    cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
-    contextWindow: 1_000_000,
-    maxTokens: 128_000,
-  },
-  {
-    id: "gpt-5.6-sol",
-    name: "GPT-5.6 Sol",
-    reasoning: true,
-    thinkingLevelMap: {
-      off: "gpt-5-6-sol-none",
-      minimal: null,
-      low: "gpt-5-6-sol-low",
-      medium: "gpt-5-6-sol-medium",
-      high: "gpt-5-6-sol-high",
-      xhigh: "gpt-5-6-sol-xhigh",
-      max: "gpt-5-6-sol-max",
-    },
-    input: ["text", "image"],
-    cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
-    contextWindow: 1_000_000,
-    maxTokens: 128_000,
-  },
-  {
-    id: "swe-1.7",
-    name: "SWE-1.7",
-    reasoning: true,
-    thinkingLevelMap: {
-      off: null,
-      minimal: null,
-      low: null,
-      medium: "swe-1-7-medium",
-      high: "swe-1-7",
-      xhigh: null,
-      max: null,
-    },
-    input: ["text", "image"],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 262_000,
-    maxTokens: 128_000,
-  },
-];
+// Only advertise models from a successfully loaded CLI catalog or its cache.
+export const FALLBACK_MODELS: ProviderModelConfig[] = [];
 
 export function modelsFromCatalog(catalog: DevinCatalog | null): ProviderModelConfig[] {
-  if (!catalog?.families?.length) return FALLBACK_MODELS;
-  const models = catalog.families.flatMap(familyToModels);
-  return models.length > 0 ? models : FALLBACK_MODELS;
+  return catalog?.families?.flatMap(familyToModels) ?? [];
 }
 
 export async function loadCliCatalog(): Promise<DevinCatalog | null> {

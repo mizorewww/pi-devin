@@ -1,7 +1,7 @@
 {
   "name": "pi-devin-local",
-  "version": "0.2.3",
-  "description": "Devin Local models in Pi — SWE-2, Opus 5, Fable 5, Sol and friends, with auth and the live model catalog coming from the local Devin CLI.",
+  "version": "0.3.0",
+  "description": "Devin Local models in Pi \u2014 SWE-2, Opus 5, Fable 5, Sol and friends, with auth and the live model catalog coming from the local Devin CLI.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -40,12 +40,13 @@
     "README.md",
     "README_zh.md",
     "AGENTS.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/"
   ],
   "scripts": {
     "test": "node test-runner.mjs",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "tsc --noEmit"
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.86.0",

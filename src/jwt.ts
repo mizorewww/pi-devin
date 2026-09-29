@@ -78,23 +78,35 @@ export async function mintUserJwt(
 let cache: { jwt: string; expiresAt: number; apiKey: string; host: string } | null = null;
 const inFlight = new Map<string, Promise<MintedUserJwt>>();
 
+function waitForJwt(promise: Promise<MintedUserJwt>, signal?: AbortSignal): Promise<MintedUserJwt> {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const aborted = () => reject(signal.reason);
+    signal.addEventListener("abort", aborted, { once: true });
+    void promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", aborted));
+  });
+}
+
 export async function getCachedUserJwt(apiKey: string, host: string, signal?: AbortSignal): Promise<string> {
+  signal?.throwIfAborted();
   const now = Math.floor(Date.now() / 1000);
-  if (cache && cache.apiKey === apiKey && cache.host === host && cache.expiresAt > now + 60) {
-    return cache.jwt;
-  }
+  if (cache && cache.apiKey === apiKey && cache.host === host && cache.expiresAt > now + 60) return cache.jwt;
   const key = `${host}\x1f${apiKey}`;
-  const existing = inFlight.get(key);
-  if (existing) return (await existing).jwt;
-  const promise = mintUserJwt(apiKey, host, signal);
-  inFlight.set(key, promise);
-  try {
-    const minted = await promise;
-    cache = { jwt: minted.jwt, expiresAt: minted.expiresAt, apiKey, host };
-    return minted.jwt;
-  } finally {
-    inFlight.delete(key);
+  let promise = inFlight.get(key);
+  if (!promise) {
+    // A caller can cancel its own wait without cancelling other sessions' mint.
+    const pending = mintUserJwt(apiKey, host).then((minted) => {
+      if (inFlight.get(key) === pending) cache = { ...minted, apiKey, host };
+      return minted;
+    });
+    promise = pending;
+    inFlight.set(key, pending);
+    void pending.finally(() => {
+      if (inFlight.get(key) === pending) inFlight.delete(key);
+    }).catch(() => {});
   }
+  return (await waitForJwt(promise, signal)).jwt;
 }
 
 export function clearCachedUserJwt(): void {

@@ -105,6 +105,24 @@ pi install ~/Developers/pi-devin
 - **思维链完整往返。** 服务端下发的思考摘要、sealed 签名和 redacted 标记都会保存在 thinking block 上，并在下一次请求中回传（与 Devin CLI 一致），模型因此能保留自己此前的推理。
 - **请求形状与 Devin CLI 对齐。** 系统提示放在服务端的 system 槽位，采样配置、trajectory reference、planner mode 均对齐，并移除了多余的 `execution_id`。
 
+## 0.3.0 兼容性与验证
+
+要求 Pi 0.86+、Node 22.19+。只有一个 variant 的模型也统一使用 CLI 的 family slug；
+如果旧选择保存的是原始 `MODEL_*` 或 variant ID，请重新选择模型。
+首次离线启动且没有目录缓存时不会列出模型；联网后执行 `/login devin` 或
+`/devin-refresh`。不再使用硬编码模型列表。
+
+本版修复了新 CLI 价格格式、工具结果中的图片和错误标记、交错工具流、JWT 取消及
+会话隔离。截断的工具 JSON 和服务端错误会明确报错。默认等待响应超时为五分钟
+（可通过 `timeoutMs` 覆盖），输出上限遵循模型目录。费用按 CLI 已提供的费率估算；
+未提供的缓存费率视为未知，显示为零，不等同于实际账单。
+
+2026-09-29 已对 Devin CLI 3000.10.27 / Desktop 3.10.27 实测：SWE-2、GPT-6 Sol、
+Claude Opus 5.5 均完成两轮工具调用；SWE-2 的签名回传成功，Claude 能读取工具结果
+中的图片。这是可能随服务端变化的私有协议；完整发现和验证边界见
+[审查报告](docs/protocol-audit-2026-09-29.md)，包括尚未验证的 Gemini 专用推理签名。
+没有 Devin.app 的环境可通过 `DEVIN_CLIENT_VERSION` 覆盖备用客户端版本。
+
 ## 发布
 
 ```bash

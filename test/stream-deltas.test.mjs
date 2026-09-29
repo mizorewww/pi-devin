@@ -12,7 +12,7 @@ const model = {
   contextWindow: 1_000_000, maxTokens: 1000,
 };
 
-async function run(t, frames) {
+async function run(t, frames, expectedError = false) {
   clearCachedUserJwt();
   t.after(clearCachedUserJwt);
   t.mock.method(globalThis, "fetch", async (url) => {
@@ -35,7 +35,8 @@ async function run(t, frames) {
   const events = [];
   for await (const event of stream) events.push(structuredClone(event));
   const result = await stream.result();
-  assert.notEqual(result.stopReason, "error", result.errorMessage);
+  if (expectedError) assert.equal(result.stopReason, "error");
+  else assert.notEqual(result.stopReason, "error", result.errorMessage);
   return { events, result };
 }
 
@@ -83,4 +84,35 @@ test("keeps growing tool arguments across split keys, strings, and Unicode escap
   assert.equal(deltas[1].partial.content[0].arguments.content, "hello");
   assert.deepEqual(result.content[0].arguments, { path: "file.txt", content: "hello ☺" });
   assert.equal(result.stopReason, "toolUse");
+});
+
+const toolDelta = (id, name, args) => encodeMessage(6, Buffer.concat([
+  ...(id ? [encodeString(1, id)] : []), ...(name ? [encodeString(2, name)] : []), encodeString(3, args),
+]));
+
+test('routes interleaved and repeated tool headers by call ID', async (t) => {
+  const {result, events} = await run(t, [
+    toolDelta('a', 'write', '{"a":'), toolDelta('b', 'read', '{"b":'),
+    toolDelta('a', 'write', '1}'), toolDelta('b', undefined, '2}'), encodeVarintField(5, 10),
+  ]);
+  assert.deepEqual(result.content.map((b) => b.arguments), [{a:1}, {b:2}]);
+  assert.equal(events.filter((e) => e.type === 'toolcall_start').length, 2);
+  assert.equal(events.filter((e) => e.type === 'toolcall_end').length, 2);
+});
+
+test('rejects truncated tool JSON instead of executing repaired arguments', async (t) => {
+  const {events} = await run(t, [toolDelta('a', 'write', '{"path":"wrong'), encodeVarintField(5, 3)], true);
+  assert.equal(events.some((e) => e.type === 'done'), false);
+});
+
+test('treats server error stop reasons as errors', async (t) => {
+  await run(t, [encodeVarintField(5, 13)], true);
+});
+
+test('reads ModelUsageStats when dimension-group metrics are absent', async (t) => {
+  const {result} = await run(t, [encodeMessage(7, Buffer.concat([
+    encodeVarintField(2, 100), encodeVarintField(3, 20), encodeVarintField(4, 30), encodeVarintField(5, 40),
+  ]))]);
+  assert.equal(result.usage.totalTokens, 190);
+  assert.equal(result.usage.cacheRead, 40); assert.equal(result.usage.cacheWrite, 30);
 });

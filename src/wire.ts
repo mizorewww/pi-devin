@@ -50,6 +50,7 @@ export function decodeVarint(buf: Buffer, offset: number): [bigint, number] {
   let shift = 0n;
   let i = offset;
   while (i < buf.length) {
+    if (shift >= 70n) throw new Error("oversized varint");
     const b = buf[i++];
     res |= BigInt(b & 0x7f) << shift;
     if (!(b & 0x80)) return [res, i];
@@ -70,29 +71,30 @@ export function* iterFields(buf: Buffer): Generator<ProtoField> {
     const [tagBig, next] = decodeVarint(buf, i);
     i = next;
     const tag = Number(tagBig);
-    const num = tag >> 3;
+    const num = Math.floor(tag / 8);
+    if (!Number.isSafeInteger(tag) || num < 1 || num > 0x1fffffff) throw new Error("invalid protobuf tag");
     const wire = tag & 0x7;
     if (wire === 0) {
       const [v, after] = decodeVarint(buf, i);
       i = after;
       yield { num, wire, value: v };
     } else if (wire === 1) {
-      if (i + 8 > buf.length) return;
+      if (i + 8 > buf.length) throw new Error("truncated fixed64");
       yield { num, wire, value: buf.subarray(i, i + 8) };
       i += 8;
     } else if (wire === 2) {
       const [n, after] = decodeVarint(buf, i);
       i = after;
       const len = Number(n);
-      if (len < 0 || i + len > buf.length) return;
+      if (!Number.isSafeInteger(len) || len < 0 || i + len > buf.length) throw new Error("truncated protobuf field");
       yield { num, wire, value: buf.subarray(i, i + len) };
       i += len;
     } else if (wire === 5) {
-      if (i + 4 > buf.length) return;
+      if (i + 4 > buf.length) throw new Error("truncated fixed32");
       yield { num, wire, value: buf.subarray(i, i + 4) };
       i += 4;
     } else {
-      return;
+      throw new Error(`unsupported protobuf wire type ${wire}`);
     }
   }
 }

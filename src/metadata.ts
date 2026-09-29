@@ -13,11 +13,14 @@ import {
  * server serves them and the response header echoes the exact model
  * (verified: "GPT-5.6 Sol High Thinking" for gpt-5-6-sol-high, 2026-08-29).
  */
-const FALLBACK_WINDSURF_VERSION = "3.6.27";
+// Verified against Devin Desktop 3.10.27 during the 0.3.0 protocol audit.
+const FALLBACK_WINDSURF_VERSION = "3.10.27";
 const PRODUCT_JSON =
   "/Applications/Devin.app/Contents/Resources/app/product.json";
 
 function desktopWindsurfVersion(): string {
+  const override = process.env.DEVIN_CLIENT_VERSION;
+  if (override && /^\d+\.\d+\.\d+$/.test(override)) return override;
   try {
     if (!existsSync(PRODUCT_JSON)) return FALLBACK_WINDSURF_VERSION;
     const product = JSON.parse(readFileSync(PRODUCT_JSON, "utf8")) as {

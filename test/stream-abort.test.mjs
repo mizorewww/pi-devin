@@ -102,3 +102,29 @@ test("real fetch cancellation after a response chunk leaves the process usable",
   assert.equal((await next.result()).stopReason, "stop");
   assert.equal(chats, 2);
 });
+
+for (const mode of ['idle', 'socket-close', 'eos-open']) {
+  test(`handles real transport ${mode} without hanging or leaking a rejection`, { timeout: 5000 }, async (t) => {
+    const { createServer } = await import('node:http');
+    const { once } = await import('node:events');
+    const { encodeString, frameConnectStream } = await import('../src/wire.ts');
+    clearCachedUserJwt(); t.after(clearCachedUserJwt);
+    const server = createServer((req, res) => {
+      if (req.url.endsWith('/GetUserJwt')) { res.end(encodeString(1, 'eyJtest.jwt')); return; }
+      res.writeHead(200, {'Content-Type': 'application/connect+proto'});
+      res.write(frameConnectStream(encodeString(3, 'started'), false));
+      if (mode === 'socket-close') setTimeout(() => res.destroy(), 10);
+      if (mode === 'eos-open') res.write(Buffer.from([2, 0, 0, 0, 2, 123, 125]));
+    });
+    t.after(() => { server.closeAllConnections(); server.close(); });
+    server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const stream = streamDevin(model, {messages: []}, {
+      apiKey: 'test-key', timeoutMs: 100,
+      env: {DEVIN_API_SERVER_URL: `http://127.0.0.1:${server.address().port}`},
+    });
+    for await (const event of stream) {}
+    const result = await stream.result();
+    assert.equal(result.stopReason, mode === 'eos-open' ? 'stop' : 'error');
+    if (mode === 'idle') assert.match(result.errorMessage, /timed out/);
+  });
+}

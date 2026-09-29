@@ -122,6 +122,26 @@ Everything upstream does, plus:
   system slot, matching sampling configuration, trajectory reference and planner
   mode, no stray `execution_id`.
 
+## 0.3.0 compatibility and validation
+
+Requires Pi 0.86+ and Node 22.19+. Single-variant models now also use the CLI family
+slug; reselect the model if a saved selection used a raw `MODEL_*` or variant ID.
+A cold offline start has no models until a CLI catalog has been cached; run
+`/login devin` or `/devin-refresh` while online. No hardcoded model list is used.
+
+The current CLI price format, tool-result images/error flags, concurrent tool streams,
+JWT cancellation and session isolation are handled. Incomplete tool JSON and server
+errors fail explicitly. The stream has a five-minute idle timeout (overridable with
+`timeoutMs`), and requests respect the model's output limit. Cost estimates use the
+CLI's reported rates; an omitted cache rate is unknown and displayed as zero.
+
+Verified on 2026-09-29 against Devin CLI 3000.10.27 / Desktop 3.10.27: SWE-2,
+GPT-6 Sol and Claude Opus 5.5 completed two-turn tool probes; SWE-2 replayed signed
+thinking, and Claude read a tool-result image. This private protocol can change.
+See the [audit report](docs/protocol-audit-2026-09-29.md) for findings and coverage
+limits, including unverified Gemini-specific thought signatures. On systems without
+Devin.app, `DEVIN_CLIENT_VERSION` can override the fallback client version.
+
 ## Publish
 
 ```bash

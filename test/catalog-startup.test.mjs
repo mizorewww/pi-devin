@@ -51,7 +51,7 @@ test("fresh cache registers once without invoking the CLI", async (t) => {
   const x = setup(t); writeCatalogCache(catalog);
   await extension(x.pi);
   assert.equal(x.calls(), 0); assert.equal(x.registrations.length, 1);
-  assert.equal(x.registrations[0].models[0].id, "test-high");
+  assert.equal(x.registrations[0].models[0].id, "test");
 });
 
 test("malformed cached cost data cannot prevent provider and command registration", async (t) => {
@@ -60,13 +60,13 @@ test("malformed cached cost data cannot prevent provider and command registratio
   fs.mkdirSync(join(process.env.XDG_CACHE_HOME, "pi-devin"));
   fs.writeFileSync(x.path, JSON.stringify({ version: 1, fetchedAt: Date.now(), catalog: malformed }));
   await extension(x.pi);
-  assert.equal(x.registrations.length, 1); assert.ok(x.registrations[0].models.length);
+  assert.equal(x.registrations.length, 1); assert.equal(x.registrations[0].models.length, 0);
   assert.ok(x.commands["devin-refresh"]); assert.equal(x.calls(), 0);
 });
 
 test("cold startup loads and caches the CLI catalog", async (t) => {
   const x = setup(t); await extension(x.pi);
-  assert.equal(x.calls(), 1); assert.equal(x.registrations.at(-1).models[0].id, "test-high");
+  assert.equal(x.calls(), 1); assert.equal(x.registrations.at(-1).models[0].id, "test");
   assert.deepEqual(JSON.parse(fs.readFileSync(x.path, "utf8")).catalog, catalog);
 });
 
@@ -76,7 +76,7 @@ test("stale cache shares its background request with manual refresh", async (t) 
   const notifications = [];
   await x.commands["devin-refresh"].handler("", { ui: { notify: (...args) => notifications.push(args) } });
   assert.equal(x.calls(), 1); assert.equal(notifications.at(-1)[1], "info");
-  assert.equal(x.registrations.at(-1).models[0].id, "test-high");
+  assert.equal(x.registrations.at(-1).models[0].id, "test");
 });
 
 test("failed refresh retains cached models and does not overwrite the cache", async (t) => {
@@ -90,7 +90,7 @@ test("failed refresh retains cached models and does not overwrite the cache", as
 
 test("offline cold startup uses fallback without running the CLI", async (t) => {
   const x = setup(t); process.env.PI_OFFLINE = "true";
-  await extension(x.pi); assert.equal(x.calls(), 0); assert.ok(x.registrations[0].models.length);
+  await extension(x.pi); assert.equal(x.calls(), 0); assert.equal(x.registrations[0].models.length, 0);
 });
 
 test("shutdown prevents a late background result from registering a provider", async (t) => {

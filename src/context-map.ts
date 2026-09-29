@@ -20,6 +20,7 @@ export interface ChatHistoryItem {
   role: "user" | "assistant" | "tool";
   content: string | ContentPart[];
   tool_call_id?: string;
+  tool_result_is_error?: boolean;
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   /** Prior reasoning, replayed so the server can verify and continue it. */
   thinking?: ChatThinking;
@@ -52,7 +53,7 @@ function userContent(content: Message["content"]): string | ContentPart[] {
   return parts;
 }
 
-export function mapContextToChat(context: TranscriptContext): MappedChat {
+export function mapContextToChat(context: TranscriptContext, modelId?: string): MappedChat {
   // Fold later system updates into the single prompt sent separately to Devin.
   const transcript = collapseSystemMessages(context);
   const systemPrompt = getCurrentSystemPrompt(transcript.messages);
@@ -79,7 +80,8 @@ export function mapContextToChat(context: TranscriptContext): MappedChat {
           const decoded = unpackThinkingSignature(part.thinkingSignature);
           // One thinking slot per message on the wire, and an unsigned trace is
           // not replayable — keep the newest block that the server can verify.
-          if (part.thinking && decoded.signature) {
+          if (decoded.signature && message.provider === "devin" && message.api === "devin-local"
+            && (!modelId || message.model === modelId)) {
             thinking = {
               text: part.thinking,
               signature: decoded.signature,
@@ -98,17 +100,11 @@ export function mapContextToChat(context: TranscriptContext): MappedChat {
       continue;
     }
     if (message.role === "toolResult") {
-      const text =
-        typeof message.content === "string"
-          ? message.content
-          : message.content
-              .filter((part) => part.type === "text")
-              .map((part) => part.text)
-              .join("\n");
       messages.push({
         role: "tool",
-        content: text,
+        content: userContent(message.content),
         tool_call_id: message.toolCallId,
+        tool_result_is_error: message.isError,
       });
     }
   }

@@ -53,10 +53,11 @@ function mockDevin(t, replies = [Buffer.concat([encodeString(3, "OK"), encodeVar
   return requests;
 }
 
-async function complete(context) {
+async function complete(context, options = {}) {
   const stream = streamDevin(model, context, {
     apiKey: "synthetic-test-key",
     env: { DEVIN_API_SERVER_URL: "https://devin.invalid" },
+    ...options,
   });
   for await (const event of stream) {
     assert.notEqual(event.type, "error", event.error?.errorMessage);
@@ -194,4 +195,49 @@ test("replays signed thinking after a system update on the next turn", async (t)
   assert.equal(stringField(assistant, 12), signature);
   assert.equal(assistant.find((field) => field.num === 13)?.value, 1n);
   assert.equal(stringField(assistant, 18), "sealed");
+});
+
+test("preserves tool result images and error status on the wire", async (t) => {
+  const requests = mockDevin(t);
+  await complete({ messages: [{ role: "toolResult", toolCallId: "image-call", toolName: "read", isError: true, timestamp: 1,
+    content: [{ type: "text", text: "partial screenshot" }, { type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] }] });
+  const message = messages(requests[0])[0];
+  assert.equal(stringField(message, 7), "image-call");
+  assert.equal(message.find((f) => f.num === 9)?.value, 1n);
+  assert.equal(stringField(fields(message.find((f) => f.num === 10).value), 1), "aW1hZ2U=");
+});
+
+test("uses model output limits and isolates trajectory IDs by Pi session", async (t) => {
+  const requests = mockDevin(t, Array(3).fill(encodeString(3, "OK")));
+  for (const sessionId of ["one", "one", "two"]) await complete({messages: []}, { sessionId, maxTokens: 5000 });
+  for (const request of requests) {
+    const config = fields(request.find((f) => f.num === 8).value);
+    assert.equal(config.find((f) => f.num === 2).value, 1000n);
+    assert.equal(config.find((f) => f.num === 3).value, 400n);
+    assert.equal(request.some((f) => f.num === 22), false);
+  }
+  const trajectory = (r) => stringField(fields(r.find((f) => f.num === 15).value), 1);
+  assert.equal(trajectory(requests[0]), trajectory(requests[1]));
+  assert.notEqual(trajectory(requests[0]), trajectory(requests[2]));
+});
+
+test("does not replay signatures from another provider or model", async (t) => {
+  const requests = mockDevin(t);
+  await complete({ messages: [
+    {role: "assistant", api: "anthropic-messages", provider: "anthropic", model: "other", content: [{type: "thinking", thinking: "foreign", thinkingSignature: "foreign-signature"}], timestamp: 1},
+    {role: "assistant", api: "devin-local", provider: "devin", model: "other", content: [{type: "thinking", thinking: "other model", thinkingSignature: "sealed.v1.other"}], timestamp: 2},
+  ]});
+  for (const message of messages(requests[0])) assert.equal(message.some((f) => f.num === 12), false);
+});
+
+test("replays a signature-only redacted thinking block", async (t) => {
+  const requests = mockDevin(t, [Buffer.concat([encodeString(10, "sealed.v1.empty"), encodeVarintField(11, 1)]), encodeString(3, "OK")]);
+  const context = { messages: [] };
+  const first = await complete(context);
+  assert.equal(first.content[0].thinking, "");
+  context.messages.push(first);
+  await complete(context);
+  const assistant = messages(requests[1])[0];
+  assert.equal(stringField(assistant, 12), "sealed.v1.empty");
+  assert.equal(assistant.find((f) => f.num === 13).value, 1n);
 });

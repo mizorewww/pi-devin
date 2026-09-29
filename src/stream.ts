@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as zlib from "node:zlib";
 import {
   type Api,
@@ -15,7 +15,7 @@ import { mapContextToChat, type ChatHistoryItem, type ContentPart, type ToolDef 
 import { getCachedUserJwt } from "./jwt.js";
 import { buildMetadata } from "./metadata.js";
 import { resolveModelUid } from "./models.js";
-import { packThinkingSignature, type ChatThinking } from "./thinking.js";
+import { packThinkingSignature, unpackThinkingSignature, type ChatThinking } from "./thinking.js";
 import {
   encodeFixed64Field,
   encodeMessage,
@@ -34,11 +34,11 @@ const SOURCE_BY_ROLE: Record<ChatHistoryItem["role"], number> = {
 export type CloudChatEvent =
   | { kind: "text"; text: string }
   | { kind: "reasoning"; text: string }
-  | { kind: "reasoning_signature"; signature: string; signatureType?: string }
+  | { kind: "reasoning_signature"; signature?: string; signatureType?: string }
   | { kind: "reasoning_redacted" }
   | { kind: "tool_call_start"; id: string; name: string }
   | { kind: "tool_call_args"; argsDelta: string; id?: string }
-  | { kind: "finish"; reason: "stop" | "tool_calls" | "length" | "content_filter" }
+  | { kind: "finish"; reason: "stop" | "tool_calls" | "length" | "content_filter" | "error" }
   | {
       kind: "usage";
       promptTokens?: number;
@@ -69,6 +69,7 @@ function encodeChatMessagePrompt(
   source: number,
   opts?: {
     toolCallId?: string;
+    toolResultIsError?: boolean;
     toolCalls?: Array<{ id: string; name: string; arguments: string }>;
     thinking?: ChatThinking;
   },
@@ -83,6 +84,7 @@ function encodeChatMessagePrompt(
     encodeVarintField(4, Math.max(1, Math.floor(text.length / 4))),
     encodeVarintField(5, 1),
   ];
+  if (opts?.toolResultIsError) parts.push(encodeVarintField(9, 1));
   if (opts?.toolCallId) parts.push(encodeString(7, opts.toolCallId));
   for (const tc of opts?.toolCalls ?? []) parts.push(encodeMessage(6, encodeChatToolCall(tc)));
   for (const img of content.filter((part) => part.type === "image")) {
@@ -156,6 +158,7 @@ function buildGetChatMessageRequest(args: {
       3,
       encodeChatMessagePrompt(normalizeContent(message.content), SOURCE_BY_ROLE[message.role], {
         toolCallId: message.role === "tool" ? message.tool_call_id : undefined,
+        toolResultIsError: message.role === "tool" ? message.tool_result_is_error : undefined,
         toolCalls: message.role === "assistant" ? message.tool_calls : undefined,
         thinking: message.role === "assistant" ? message.thinking : undefined,
       }),
@@ -215,8 +218,22 @@ function* decodeChatFrame(proto: Buffer): Generator<CloudChatEvent> {
       let reason: Extract<CloudChatEvent, { kind: "finish" }>['reason'] = "stop";
       if (value === 10) reason = "tool_calls";
       else if (value === 11) reason = "content_filter";
-      else if (value === 1 || value === 3) reason = "length";
+      else if (value === 7 || value === 13) reason = "error";
+      else if (value === 1 || value === 3 || value === 5 || value === 9) reason = "length";
       yield { kind: "finish", reason };
+    } else if (field.num === 7 && field.wire === 2 && Buffer.isBuffer(field.value)) {
+      // ModelUsageStats, verified against the current language-server descriptor.
+      const usage: Extract<CloudChatEvent, { kind: "usage" }> = { kind: "usage" };
+      for (const stat of iterFields(field.value)) {
+        if (stat.wire !== 0) continue;
+        const n = Number(stat.value);
+        if (stat.num === 2) usage.promptTokens = n;
+        else if (stat.num === 3) usage.completionTokens = n;
+        else if (stat.num === 4) usage.cacheCreationInputTokens = n;
+        else if (stat.num === 5) usage.cachedInputTokens = n;
+      }
+      usage.totalTokens = (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0) + (usage.cachedInputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0);
+      yield usage;
     } else if (field.num === 28 && field.wire === 2 && Buffer.isBuffer(field.value)) {
       const usage = decodeUsage(field.value);
       if (usage) yield usage;
@@ -224,7 +241,7 @@ function* decodeChatFrame(proto: Buffer): Generator<CloudChatEvent> {
   }
   // The signature trails the thinking text, so it is yielded once the frame is
   // fully read and gets attached to the block that is already closed.
-  if (signature) yield { kind: "reasoning_signature", signature, signatureType };
+  if (signature || signatureType) yield { kind: "reasoning_signature", signature, signatureType };
 }
 
 function decodeUsage(buf: Buffer): CloudChatEvent | null {
@@ -267,11 +284,12 @@ function decodeUsage(buf: Buffer): CloudChatEvent | null {
 
 const sessionCache = new Map<string, { sessionId: string; cascadeId: string; trajectoryId: string }>();
 
-function sessionIds(apiKey: string, host: string) {
-  const key = `${host}\x1f${apiKey}`;
+function sessionIds(apiKey: string, host: string, sessionId?: string) {
+  const key = createHash("sha256").update(`${host}\x1f${apiKey}\x1f${sessionId ?? randomUUID()}`).digest("hex");
   let ids = sessionCache.get(key);
   if (!ids) {
     ids = { sessionId: randomUUID(), cascadeId: randomUUID(), trajectoryId: randomUUID() };
+    if (sessionCache.size >= 256) sessionCache.delete(sessionCache.keys().next().value!);
     sessionCache.set(key, ids);
   }
   return ids;
@@ -286,10 +304,11 @@ async function* streamChatEvents(args: {
   tools?: ToolDef[];
   maxOutputTokens?: number;
   signal?: AbortSignal;
+  sessionId?: string;
 }): AsyncGenerator<CloudChatEvent> {
   const host = args.host.replace(/\/$/, "");
   const userJwt = await getCachedUserJwt(args.apiKey, host, args.signal);
-  const ids = sessionIds(args.apiKey, host);
+  const ids = sessionIds(args.apiKey, host, args.sessionId);
   const proto = buildGetChatMessageRequest({
     apiKey: args.apiKey,
     userJwt,
@@ -364,7 +383,7 @@ async function* streamChatEvents(args: {
   };
 
   try {
-    while (true) {
+    readFrames: while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       if (value) {
@@ -376,24 +395,19 @@ async function* streamChatEvents(args: {
         if (!header) break;
         const flags = header[0];
         const len = header.readUInt32BE(1);
+        if (flags & ~0x03) throw new Error(`Unsupported Connect frame flags: ${flags}`);
+        if (len > 64 * 1024 * 1024) throw new Error("Devin stream frame exceeds 64 MiB");
         if (queued < 5 + len) break;
         drop(5);
         const raw = peek(len) ?? Buffer.alloc(0);
         drop(len);
         let payload = raw;
-        if (flags & 0x01) payload = zlib.gunzipSync(raw);
+        if (flags & 0x01) payload = zlib.gunzipSync(raw, { maxOutputLength: 64 * 1024 * 1024 });
         if (flags & 0x02) {
           sawEos = true;
-          const text = payload.toString("utf8");
-          if (text.includes('"error"')) {
-            try {
-              const parsed = JSON.parse(text) as { error?: { message?: string } };
-              trailerError = parsed.error?.message ?? text;
-            } catch {
-              trailerError = text;
-            }
-          }
-          continue;
+          const parsed = JSON.parse(payload.toString("utf8")) as { error?: { code?: string; message?: string } };
+          if (parsed.error) trailerError = parsed.error.message || parsed.error.code || "Devin stream error";
+          break readFrames;
         }
         yield* decodeChatFrame(payload);
       }
@@ -446,10 +460,16 @@ export function streamDevin(
     let textOpen = false;
     let thinkingOpen = false;
     let thinkingIndex = -1;
-    let toolIndex = -1;
-    let partialJson = "";
-    let toolId = "";
-    let toolName = "";
+    const toolStates = new Map<string, { index: number; json: string; ended: boolean }>();
+    let activeToolId: string | undefined;
+    const timeoutController = new AbortController();
+    const signal = options?.signal ? AbortSignal.any([options.signal, timeoutController.signal]) : timeoutController.signal;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const resetTimeout = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(() => timeoutController.abort(new Error("Devin stream timed out waiting for a response")), options?.timeoutMs ?? 300_000);
+      timeout.unref();
+    };
 
     const closeText = () => {
       if (!textOpen) return;
@@ -462,34 +482,35 @@ export function streamDevin(
     };
     const closeThinking = () => {
       if (!thinkingOpen) return;
-      const idx = output.content.length - 1;
+      const idx = thinkingIndex;
       const block = output.content[idx];
       if (block.type === "thinking") {
         stream.push({ type: "thinking_end", contentIndex: idx, content: block.thinking, partial: output });
       }
       thinkingOpen = false;
     };
-    const closeTool = () => {
-      if (toolIndex < 0) return;
-      const block = output.content[toolIndex];
-      if (block.type === "toolCall") {
-        block.arguments = parseStreamingJson(partialJson);
-        stream.push({
-          type: "toolcall_end",
-          contentIndex: toolIndex,
-          toolCall: { type: "toolCall", id: toolId, name: toolName, arguments: block.arguments },
-          partial: output,
-        });
+    const closeTools = () => {
+      for (const state of toolStates.values()) {
+        if (state.ended) continue;
+        const block = output.content[state.index];
+        if (block.type !== "toolCall") continue;
+        // Partial JSON is useful in the UI, but never execute a repaired/truncated call.
+        const parsed = JSON.parse(state.json || "{}");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid Devin tool arguments: expected an object");
+        block.arguments = parsed;
+        state.ended = true;
+        stream.push({ type: "toolcall_end", contentIndex: state.index, toolCall: block, partial: output });
       }
-      toolIndex = -1;
     };
 
     try {
+      resetTimeout();
+      signal.throwIfAborted();
       const apiKey = options?.apiKey;
       if (!apiKey) throw new Error("No Devin credentials. Run /login devin (uses the local Devin CLI).");
       const host = (options?.env?.DEVIN_API_SERVER_URL || "https://server.codeium.com").replace(/\/$/, "");
       const modelUid = resolveModelUid(model.id, model.thinkingLevelMap, options?.reasoning);
-      const mapped = mapContextToChat(context);
+      const mapped = mapContextToChat(context, model.id);
       stream.push({ type: "start", partial: output });
 
       for await (const event of streamChatEvents({
@@ -499,9 +520,11 @@ export function streamDevin(
         systemPrompt: mapped.systemPrompt,
         messages: mapped.messages,
         tools: mapped.tools.length > 0 ? mapped.tools : undefined,
-        maxOutputTokens: options?.maxTokens,
-        signal: options?.signal,
+        maxOutputTokens: Math.min(options?.maxTokens ?? model.maxTokens, model.maxTokens),
+        signal,
+        sessionId: options?.sessionId,
       })) {
+        resetTimeout();
         if (event.kind === "text") {
           closeThinking();
           if (!textOpen) {
@@ -530,37 +553,50 @@ export function streamDevin(
             stream.push({ type: "thinking_delta", contentIndex: idx, delta: event.text, partial: output });
           }
         } else if (event.kind === "reasoning_signature") {
-          const block = thinkingIndex >= 0 ? output.content[thinkingIndex] : undefined;
-          if (block?.type === "thinking") {
-            block.thinkingSignature = packThinkingSignature(event.signature, event.signatureType);
+          if (thinkingIndex < 0) {
+            closeText();
+            output.content.push({ type: "thinking", thinking: "" });
+            thinkingIndex = output.content.length - 1;
+            thinkingOpen = true;
+            stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+          }
+          const block = output.content[thinkingIndex];
+          if (block.type === "thinking") {
+            const prior = unpackThinkingSignature(block.thinkingSignature);
+            block.thinkingSignature = packThinkingSignature(event.signature ?? prior.signature ?? "", event.signatureType ?? prior.signatureType);
           }
         } else if (event.kind === "reasoning_redacted") {
-          const block = thinkingIndex >= 0 ? output.content[thinkingIndex] : undefined;
-          if (block?.type === "thinking") block.redacted = true;
+          if (thinkingIndex < 0) {
+            closeText();
+            output.content.push({ type: "thinking", thinking: "" });
+            thinkingIndex = output.content.length - 1;
+            thinkingOpen = true;
+            stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
+          }
+          const block = output.content[thinkingIndex];
+          if (block.type === "thinking") block.redacted = true;
         } else if (event.kind === "tool_call_start") {
           closeText();
           closeThinking();
-          closeTool();
-          toolId = event.id;
-          toolName = event.name;
-          partialJson = "";
-          output.content.push({ type: "toolCall", id: event.id, name: event.name, arguments: {} });
-          toolIndex = output.content.length - 1;
-          stream.push({ type: "toolcall_start", contentIndex: toolIndex, partial: output });
-        } else if (event.kind === "tool_call_args") {
-          if (toolIndex < 0) continue;
-          partialJson += event.argsDelta;
-          const block = output.content[toolIndex];
-          if (block.type === "toolCall") {
-            block.arguments = parseStreamingJson(partialJson);
+          let state = toolStates.get(event.id);
+          if (!state) {
+            output.content.push({ type: "toolCall", id: event.id, name: event.name, arguments: {} });
+            state = { index: output.content.length - 1, json: "", ended: false };
+            toolStates.set(event.id, state);
+            stream.push({ type: "toolcall_start", contentIndex: state.index, partial: output });
           }
-          stream.push({ type: "toolcall_delta", contentIndex: toolIndex, delta: event.argsDelta, partial: output });
+          activeToolId = event.id;
+        } else if (event.kind === "tool_call_args") {
+          const id = event.id || activeToolId;
+          const state = id ? toolStates.get(id) : undefined;
+          if (!state || state.ended) throw new Error("Devin sent arguments for an unknown or completed tool call");
+          state.json += event.argsDelta;
+          const block = output.content[state.index];
+          if (block.type === "toolCall") block.arguments = parseStreamingJson(state.json);
+          stream.push({ type: "toolcall_delta", contentIndex: state.index, delta: event.argsDelta, partial: output });
         } else if (event.kind === "finish") {
-          closeText();
-          closeThinking();
-          closeTool();
-          output.stopReason =
-            event.reason === "tool_calls" ? "toolUse" : event.reason === "length" ? "length" : "stop";
+          if (event.reason === "error" || event.reason === "content_filter") throw new Error(`Devin stopped generation: ${event.reason}`);
+          output.stopReason = event.reason === "tool_calls" ? "toolUse" : event.reason === "length" ? "length" : "stop";
         } else if (event.kind === "usage") {
           // Empty trailers must not erase usage already received. Metrics are
           // snapshots, and a frame may contain only some of the components.
@@ -576,7 +612,9 @@ export function streamDevin(
 
       closeText();
       closeThinking();
-      closeTool();
+      signal.throwIfAborted();
+      closeTools();
+      if (toolStates.size && output.stopReason === "stop") output.stopReason = "toolUse";
       stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
       stream.end();
     } catch (error) {
@@ -584,6 +622,8 @@ export function streamDevin(
       output.errorMessage = error instanceof Error ? error.message : String(error);
       stream.push({ type: "error", reason: output.stopReason as "aborted" | "error", error: output });
       stream.end();
+    } finally {
+      clearTimeout(timeout);
     }
   })();
 

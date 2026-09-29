@@ -85,8 +85,8 @@ export async function authStatus(): Promise<{
   try {
     const { stdout, stderr, code } = await runDevin(["auth", "status"], { timeoutMs: 15_000 });
     const text = `${stdout}\n${stderr}`.trim();
-    const loggedIn = code === 0 && /logged in/i.test(text);
-    return { loggedIn: loggedIn || Boolean(creds), summary: text || (creds ? "credentials.toml present" : "not signed in") };
+    const loggedIn = code === 0 && /\blogged in\b/i.test(text) && !/\bnot logged in\b/i.test(text);
+    return { loggedIn, summary: text || (creds ? "credentials.toml present" : "not signed in") };
   } catch (error) {
     if (creds) {
       return { loggedIn: true, summary: `Devin credentials present at ${CREDENTIALS_PATH}` };
