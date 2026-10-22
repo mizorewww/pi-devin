@@ -55,6 +55,13 @@ function variantKey(uid: string): string | null {
     "high-fast",
     "xhigh-fast",
     "max-fast",
+    "none-lightning",
+    "minimal-lightning",
+    "low-lightning",
+    "medium-lightning",
+    "high-lightning",
+    "xhigh-lightning",
+    "max-lightning",
     "thinking-1m",
     "thinking",
     "none",
@@ -93,9 +100,12 @@ function preferredDefault(map: ThinkingLevelMap): string | undefined {
 }
 
 function familyToModels(family: DevinFamily): ProviderModelConfig[] {
+  // Fast lanes are separate paid tiers, not effort levels: -priority, -fast
+  // and -lightning variants cost more than their plain counterparts, so they
+  // stay out of the thinking map instead of being silently picked.
   const usable = family.variants.filter((variant) => {
     const key = variantKey(variant.model_uid);
-    return !key || (!key.includes("priority") && !key.includes("fast") && key !== "thinking-1m");
+    return !key || (!key.includes("priority") && !key.includes("fast") && !key.includes("lightning") && key !== "thinking-1m");
   });
   const source = usable.length > 0 ? usable : family.variants;
   const thinkingLevelMap: ThinkingLevelMap = {};

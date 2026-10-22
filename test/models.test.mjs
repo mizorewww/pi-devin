@@ -41,6 +41,22 @@ test('uses the CLI label for the unsuffixed SWE max variant and excludes premium
   assert.equal(m.thinkingLevelMap.high, null);
 });
 
+test('excludes -lightning variants instead of mapping them to off', () => {
+  const [m] = modelsFromCatalog(family([
+    { model_uid: 'swe-2-high', label: 'SWE-2 High' },
+    { model_uid: 'swe-2-medium', label: 'SWE-2 Medium' },
+    { model_uid: 'swe-2-max', label: 'SWE-2 Max' },
+    { model_uid: 'swe-2-medium-lightning', label: 'SWE-2 Medium Lightning' },
+    { model_uid: 'swe-2-high-lightning', label: 'SWE-2 High Lightning' },
+    { model_uid: 'swe-2-max-lightning', label: 'SWE-2 Max Lightning' },
+  ]));
+  assert.equal(m.thinkingLevelMap.high, 'swe-2-high');
+  assert.equal(m.thinkingLevelMap.medium, 'swe-2-medium');
+  assert.equal(m.thinkingLevelMap.max, 'swe-2-max');
+  assert.equal(m.thinkingLevelMap.off, null);
+  assert.equal(m.thinkingLevelMap.low, null);
+});
+
 test('does not advertise a hardcoded cloud catalog when offline or empty', () => {
   assert.deepEqual(modelsFromCatalog(null), []);
   assert.deepEqual(modelsFromCatalog({families: []}), []);
