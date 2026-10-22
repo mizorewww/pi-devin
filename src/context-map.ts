@@ -106,6 +106,12 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
               redacted: part.redacted,
             };
             generationModel ??= decoded.modelUid;
+          } else if (part.thinking) {
+            // Not replayable in the signed slot — a foreign provider's plain
+            // reasoning, an unsigned trace, or a different Devin family.
+            // Silently dropping it loses whatever the reasoning concluded, so
+            // keep it visible to the model as ordinary assistant text instead.
+            texts.push(`<thinking>\n${part.thinking}\n</thinking>`);
           }
         }
       }

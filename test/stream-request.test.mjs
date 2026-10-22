@@ -363,7 +363,37 @@ test("does not replay signatures from another provider or model", async (t) => {
     {role: "assistant", api: "anthropic-messages", provider: "anthropic", model: "other", content: [{type: "thinking", thinking: "foreign", thinkingSignature: "foreign-signature"}], timestamp: 1},
     {role: "assistant", api: "devin-local", provider: "devin", model: "other", content: [{type: "thinking", thinking: "other model", thinkingSignature: "sealed.v1.other"}], timestamp: 2},
   ]});
-  for (const message of messages(requests[0])) assert.equal(message.some((f) => f.num === 12), false);
+  for (const message of messages(requests[0])) {
+    // The opaque signature itself never rides the wire...
+    assert.equal(message.some((f) => f.num === 12), false);
+    // ...but the reasoning it protected is inlined as visible text, not lost.
+    assert.match(stringField(message, 3), /<thinking>\n(foreign|other model)\n<\/thinking>/);
+  }
+});
+
+test("inlines unsigned reasoning while replaying signed thinking natively", async (t) => {
+  const { requests } = mockDevin(t, [
+    Buffer.concat([encodeString(9, "native trace"), encodeString(10, "sealed.v1.real"), encodeVarintField(5, 0)]),
+    encodeString(3, "OK"),
+  ]);
+  const context = normalizeContext({ messages: [user("turn 1")] });
+  const first = await complete(context);
+  context.messages.push(
+    first,
+    { role: "assistant", api: "anthropic-messages", provider: "anthropic", model: "other",
+      content: [{ type: "thinking", thinking: "oss chain" }, { type: "text", text: "oss answer" }], timestamp: 2 },
+    user("turn 2"),
+  );
+  await complete(context);
+  const history = messages(requests[1]);
+  const native = history[1];
+  // The devin-signed block replays via 11/12, not as duplicated inline text.
+  assert.equal(stringField(native, 12), "sealed.v1.real");
+  assert.equal(stringField(native, 3), "");
+  assert.doesNotMatch(stringField(native, 3), /native trace/);
+  const foreign = history[2];
+  assert.equal(foreign.some((f) => f.num === 12), false);
+  assert.equal(stringField(foreign, 3), "<thinking>\noss chain\n</thinking>\noss answer");
 });
 
 test("replays a signature-only redacted thinking block", async (t) => {
