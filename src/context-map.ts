@@ -9,6 +9,20 @@ import {
 } from "@earendil-works/pi-ai";
 import { unpackThinkingSignature, type ChatThinking } from "./thinking.js";
 
+/**
+ * The variant uid that generated each Devin assistant message, remembered by
+ * object identity for the lifetime of the process. The wire replays it as
+ * ChatMessagePrompt field 22 (`generation_model`); the CLI keeps it in its
+ * session store the same way. Across restarts the uid packed into
+ * `thinkingSignature` covers thinking messages; other restored messages fall
+ * back to omitting the field.
+ */
+const generationModelUidByMessage = new WeakMap<Message, string>();
+
+export function rememberGenerationModel(message: Message, modelUid: string): void {
+  generationModelUidByMessage.set(message, modelUid);
+}
+
 export interface ContentPart {
   type: "text" | "image";
   text?: string;
@@ -24,6 +38,8 @@ export interface ChatHistoryItem {
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   /** Prior reasoning, replayed so the server can verify and continue it. */
   thinking?: ChatThinking;
+  /** Model variant that generated this assistant message (history field 22). */
+  generation_model?: string;
 }
 
 export interface ToolDef {
@@ -67,6 +83,7 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
       const texts: string[] = [];
       const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
       let thinking: ChatThinking | undefined;
+      let generationModel: string | undefined = generationModelUidByMessage.get(message);
       for (const part of message.content) {
         if (part.type === "text") texts.push(part.text);
         if (part.type === "toolCall") {
@@ -88,6 +105,7 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
               signatureType: decoded.signatureType,
               redacted: part.redacted,
             };
+            generationModel ??= decoded.modelUid;
           }
         }
       }
@@ -96,6 +114,7 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
         content: texts.join("\n"),
         tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
         thinking,
+        generation_model: generationModel,
       });
       continue;
     }

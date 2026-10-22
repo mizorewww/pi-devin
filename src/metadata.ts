@@ -1,74 +1,81 @@
-import { existsSync, readFileSync } from "node:fs";
-import {
-  encodeMessage,
-  encodeString,
-  encodeTimestampBody,
-  encodeVarintField,
-} from "./wire.js";
+import { randomBytes } from "node:crypto";
+import { devinVersion } from "./cli.js";
+import { encodeString } from "./wire.js";
 
 /**
- * Cognition gates Devin Local-only models (every GPT-5.6 variant: Sol, Terra,
- * Luna) by client ide name. With ide="windsurf" GetChatMessage rejects them
- * with "This model is only in Devin Local."; with ide="devin-desktop" the
- * server serves them and the response header echoes the exact model
- * (verified: "GPT-5.6 Sol High Thinking" for gpt-5-6-sol-high, 2026-08-29).
+ * Client identity mirrors what the Devin CLI (chisel-agent) actually sends on
+ * the wire, verified against a captured GetChatMessage request from
+ * devin 3000.11.92 (2026-10-22): ide_name = "devin-cli", extension_name and
+ * ide_type = "chisel", ide_version/extension_version = the CLI version.
+ *
+ * Earlier revisions impersonated Devin Desktop ("devin-desktop") because
+ * Cognition gated Devin Local-only models (the GPT-5.6 family) by ide name;
+ * the CLI's own identity clears that gate for the same catalog entries.
  */
-// Verified against Devin Desktop 3.10.27 during the 0.3.0 protocol audit.
-const FALLBACK_WINDSURF_VERSION = "3.10.27";
-const PRODUCT_JSON =
-  "/Applications/Devin.app/Contents/Resources/app/product.json";
+const FALLBACK_CLIENT_VERSION = "3000.11.92";
+const IDE_NAME = "devin-cli";
+const CHISEL = "chisel";
 
-function desktopWindsurfVersion(): string {
-  const override = process.env.DEVIN_CLIENT_VERSION;
-  if (override && /^\d+\.\d+\.\d+$/.test(override)) return override;
-  try {
-    if (!existsSync(PRODUCT_JSON)) return FALLBACK_WINDSURF_VERSION;
-    const product = JSON.parse(readFileSync(PRODUCT_JSON, "utf8")) as {
-      windsurfVersion?: string;
-    };
-    return product.windsurfVersion || FALLBACK_WINDSURF_VERSION;
-  } catch {
-    return FALLBACK_WINDSURF_VERSION;
+let resolvedVersion: string | undefined;
+let versionRequest: Promise<string> | null = null;
+
+/** Best-known CLI version without blocking; upgraded by ensureClientVersion(). */
+export const CLIENT_VERSION = FALLBACK_CLIENT_VERSION;
+export const CLIENT_IDE = IDE_NAME;
+
+/**
+ * Resolve the installed `devin` CLI version once per process. Metadata should
+ * report the real binary's version — a stale hardcoded one can trip the
+ * server-side minimum-version gate in either direction.
+ */
+export function ensureClientVersion(): Promise<string> {
+  if (resolvedVersion) return Promise.resolve(resolvedVersion);
+  if (!versionRequest) {
+    versionRequest = devinVersion()
+      .then((raw) => {
+        const parsed = raw?.match(/\d+\.\d+\.\d+/)?.[0];
+        resolvedVersion = parsed ?? FALLBACK_CLIENT_VERSION;
+        return resolvedVersion;
+      })
+      .catch(() => {
+        resolvedVersion = FALLBACK_CLIENT_VERSION;
+        return resolvedVersion;
+      })
+      .finally(() => {
+        versionRequest = null;
+      });
   }
+  return versionRequest;
 }
-
-export const CLIENT_VERSION = desktopWindsurfVersion();
-export const CLIENT_IDE = "devin-desktop";
 
 export interface MetadataInput {
   apiKey: string;
-  userJwt?: string;
-  sessionId: string;
-  requestId: bigint;
-  triggerId: string;
-  version?: string;
-  ide?: string;
 }
 
+/**
+ * Sparse Metadata message, identical to the CLI's: no request_id, session_id,
+ * ls_timestamp, trigger_id, plan_name or user_jwt — the CLI authenticates with
+ * the HTTP Authorization header instead. Field 31 carries 366 bytes of fresh
+ * per-request randomness encoded as 732 lowercase hex chars (the CLI's own
+ * `f` field has the same shape and changes on every call).
+ */
 export function buildMetadata(input: MetadataInput): Buffer {
-  const version = input.version ?? CLIENT_VERSION;
-  const ide = input.ide ?? CLIENT_IDE;
+  const version = resolvedVersion ?? FALLBACK_CLIENT_VERSION;
   const os =
     process.platform === "darwin"
       ? "darwin"
       : process.platform === "win32"
         ? "windows"
         : "linux";
-  const parts: Buffer[] = [
-    encodeString(1, ide),
+  return Buffer.concat([
+    encodeString(1, IDE_NAME),
     encodeString(2, version),
     encodeString(3, input.apiKey),
     encodeString(4, "en"),
     encodeString(5, os),
     encodeString(7, version),
-    encodeVarintField(9, input.requestId),
-    encodeString(10, input.sessionId),
-    encodeString(12, ide),
-    encodeMessage(16, encodeTimestampBody()),
-    encodeString(25, input.triggerId),
-    encodeString(26, "Unset"),
-    encodeString(28, ide),
-  ];
-  if (input.userJwt) parts.push(encodeString(21, input.userJwt));
-  return Buffer.concat(parts);
+    encodeString(12, CHISEL),
+    encodeString(28, CHISEL),
+    encodeString(31, randomBytes(366).toString("hex")),
+  ]);
 }

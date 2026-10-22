@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { gunzipSync } from "node:zlib";
 import { normalizeContext } from "@earendil-works/pi-ai";
-import { clearCachedUserJwt } from "../src/jwt.ts";
 import { streamDevin } from "../src/stream.ts";
+import { unpackThinkingSignature } from "../src/thinking.ts";
 import { encodeMessage, encodeString, encodeVarintField, frameConnectStream, iterFields } from "../src/wire.ts";
 
 const model = {
@@ -35,23 +35,24 @@ function response(body) {
 
 function mockDevin(t, replies = [Buffer.concat([encodeString(3, "OK"), encodeVarintField(5, 0)])]) {
   const requests = [];
-  clearCachedUserJwt();
-  t.after(clearCachedUserJwt);
+  const headers = [];
   t.mock.method(globalThis, "fetch", async (url, options) => {
-    if (url === "https://devin.invalid/exa.auth_pb.AuthService/GetUserJwt") {
-      return new Response(encodeMessage(1, Buffer.from("eyJtest.jwt")));
-    }
     assert.equal(url, "https://devin.invalid/exa.api_server_pb.ApiServerService/GetChatMessage");
     const frame = Buffer.from(options.body);
-    assert.equal(frame[0], 1, "request uses Connect gzip compression");
     assert.equal(frame.readUInt32BE(1), frame.length - 5);
-    requests.push(fields(gunzipSync(frame.subarray(5))));
+    // Large Connect frames arrive gzipped; small ones are sent uncompressed.
+    const payload = frame[0] & 1 ? gunzipSync(frame.subarray(5)) : frame.subarray(5);
+    requests.push(fields(payload));
+    headers.push(options.headers);
     const reply = replies[requests.length - 1];
     assert.ok(reply, "unexpected extra chat request");
     return response(reply);
   });
-  return requests;
+  return { requests, headers };
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const SLUG = /^[a-z]+-[a-z]+$/;
 
 async function complete(context, options = {}) {
   const stream = streamDevin(model, context, {
@@ -66,7 +67,7 @@ async function complete(context, options = {}) {
 }
 
 test("observes the encoded prompt, tools and images before adding transport credentials", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   const image = { type: "image", mimeType: "image/png", data: "aW1hZ2U=" };
   const context = normalizeContext({
     systemPrompt: "Observe this prompt.",
@@ -95,7 +96,7 @@ test("observes the encoded prompt, tools and images before adding transport cred
 });
 
 test("awaits an asynchronous payload replacement and encodes it as the request", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete(normalizeContext({ systemPrompt: "Original", tools: [readTool], messages: [user("Original user")] }), {
     onPayload: async (payload) => ({
       ...payload,
@@ -115,7 +116,7 @@ test("awaits an asynchronous payload replacement and encodes it as the request",
 });
 
 test("preserves in-place payload edits when the hook returns undefined", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete(normalizeContext({ messages: [user("Original")] }), {
     onPayload: async (payload) => {
       await Promise.resolve();
@@ -146,7 +147,7 @@ for (const mode of ["throw", "abort"]) {
 
 // #7: verify the normalized transcript survives the complete request-encoding path.
 test("encodes the current system prompt once in field 2, with unchanged user text and images", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   const text = "  Inspect this: <system>literal user text</system>\nこんにちは  ";
   const image = { type: "image", mimeType: "image/png", data: "aW1hZ2UtZml4dHVyZQ==" };
   const context = normalizeContext({
@@ -185,7 +186,7 @@ test("encodes the current system prompt once in field 2, with unchanged user tex
 });
 
 test("omits an empty system prompt while preserving tools and user content", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete(normalizeContext({ systemPrompt: "", tools: [readTool], messages: [user("Read probe.txt")] }));
   assert.equal(requests[0].filter((field) => field.num === 2).length, 0);
   assert.equal(requests[0].filter((field) => field.num === 10).length, 1);
@@ -193,14 +194,14 @@ test("omits an empty system prompt while preserving tools and user content", asy
 });
 
 test("sends a system-only transcript without inventing a user message", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete(normalizeContext({ systemPrompt: "System-only instructions.", messages: [] }));
   assert.equal(stringField(requests[0], 2), "System-only instructions.");
   assert.deepEqual(messages(requests[0]), []);
 });
 
 test("encodes an empty transcript without a prompt or history", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete(normalizeContext({ messages: [] }));
   assert.equal(stringField(requests[0], 2), undefined);
   assert.deepEqual(messages(requests[0]), []);
@@ -209,7 +210,7 @@ test("encodes an empty transcript without a prompt or history", async (t) => {
 test("retains the system prompt and replays assistant tool calls and results on the next request", async (t) => {
   const callId = "call-read";
   const args = { path: "probe.txt" };
-  const requests = mockDevin(t, [
+  const { requests } = mockDevin(t, [
     Buffer.concat([
       encodeMessage(6, Buffer.concat([encodeString(1, callId), encodeString(2, "read"), encodeString(3, JSON.stringify(args))])),
       encodeVarintField(5, 10),
@@ -247,7 +248,7 @@ test("retains the system prompt and replays assistant tool calls and results on 
 test("replays signed thinking after a system update on the next turn", async (t) => {
   const summary = "A prior reasoning summary.";
   const signature = "sealed.v1.synthetic-test-signature";
-  const requests = mockDevin(t, [
+  const { requests } = mockDevin(t, [
     Buffer.concat([
       encodeString(9, summary),
       encodeString(10, signature),
@@ -260,8 +261,12 @@ test("replays signed thinking after a system update on the next turn", async (t)
   ]);
   const context = normalizeContext({ systemPrompt: "Initial instructions.", messages: [user("First turn")] });
   const first = await complete(context);
-  assert.deepEqual(first.content.find((part) => part.type === "thinking"), {
-    type: "thinking", thinking: summary, thinkingSignature: signature, redacted: true,
+  const thinking = first.content.find((part) => part.type === "thinking");
+  assert.equal(thinking.thinking, summary);
+  assert.equal(thinking.redacted, true);
+  // The signature carries the generating variant so replays can name it later.
+  assert.deepEqual(unpackThinkingSignature(thinking.thinkingSignature), {
+    signature, signatureType: "sealed", modelUid: "test-model",
   });
   context.messages.push(first,
     { role: "system", content: "Updated instructions.", timestamp: 2 },
@@ -274,10 +279,12 @@ test("replays signed thinking after a system update on the next turn", async (t)
   assert.equal(stringField(assistant, 12), signature);
   assert.equal(assistant.find((field) => field.num === 13)?.value, 1n);
   assert.equal(stringField(assistant, 18), "sealed");
+  // Replays name the variant that produced the message (generation_model).
+  assert.equal(stringField(assistant, 22), "test-model");
 });
 
 test("preserves tool result images and error status on the wire", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete({ messages: [{ role: "toolResult", toolCallId: "image-call", toolName: "read", isError: true, timestamp: 1,
     content: [{ type: "text", text: "partial screenshot" }, { type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] }] });
   const message = messages(requests[0])[0];
@@ -287,21 +294,71 @@ test("preserves tool result images and error status on the wire", async (t) => {
 });
 
 test("uses model output limits and isolates trajectory IDs by Pi session", async (t) => {
-  const requests = mockDevin(t, Array(3).fill(encodeString(3, "OK")));
+  const { requests } = mockDevin(t, Array(3).fill(encodeString(3, "OK")));
   for (const sessionId of ["one", "one", "two"]) await complete({messages: []}, { sessionId, maxTokens: 5000 });
   for (const request of requests) {
     const config = fields(request.find((f) => f.num === 8).value);
     assert.equal(config.find((f) => f.num === 2).value, 1000n);
     assert.equal(config.find((f) => f.num === 3).value, 400n);
-    assert.equal(request.some((f) => f.num === 22), false);
+    // 22 is execution_id — a fresh uuid per call, sent on agent turns.
+    assert.match(stringField(request, 22), UUID);
   }
   const trajectory = (r) => stringField(fields(r.find((f) => f.num === 15).value), 1);
   assert.equal(trajectory(requests[0]), trajectory(requests[1]));
   assert.notEqual(trajectory(requests[0]), trajectory(requests[2]));
+  // Field 28 is the session's petname slug: stable within a Pi session,
+  // different across sessions.
+  const slug = (r) => stringField(r, 28);
+  assert.match(slug(requests[0]), SLUG);
+  assert.equal(slug(requests[0]), slug(requests[1]));
+  assert.notEqual(slug(requests[0]), slug(requests[2]));
+});
+
+test("matches the Devin CLI wire shape (headers, metadata, messages)", async (t) => {
+  const { requests, headers } = mockDevin(t, [
+    Buffer.concat([encodeString(10, "sealed.v1.sig"), encodeVarintField(5, 0)]),
+    encodeString(3, "OK"),
+  ]);
+  const context = normalizeContext({ systemPrompt: "Prompt.", messages: [user("hi")] });
+  const first = await complete(context);
+  context.messages.push(first, user("again"));
+  await complete(context);
+
+  // Headers mirror the CLI: basic auth with the session token doubled, no JWT.
+  for (const header of headers) {
+    assert.equal(header.Authorization ?? header.authorization, "Basic synthetic-test-key-synthetic-test-key");
+    assert.equal(header["Connect-Protocol-Version"], "1");
+    assert.equal(header["Accept-Encoding"], "gzip");
+    assert.match(header["Sentry-Trace"] ?? header["sentry-trace"], /^[0-9a-f]{32}-[0-9a-f]{16}-0$/);
+  }
+
+  for (const request of requests) {
+    const metadata = fields(request.find((f) => f.num === 1).value);
+    assert.equal(stringField(metadata, 1), "devin-cli");
+    assert.equal(stringField(metadata, 12), "chisel");
+    assert.equal(stringField(metadata, 28), "chisel");
+    // No user_jwt, request/session/trigger ids — the CLI omits them all.
+    for (const num of [9, 10, 16, 21, 25]) assert.equal(metadata.some((f) => f.num === num), false, `metadata.${num}`);
+    // Field 31: 366 random bytes rendered as 732 hex chars, fresh per request.
+    assert.match(stringField(metadata, 31), /^[0-9a-f]{732}$/);
+  }
+  const fp = (r) => stringField(fields(r.find((f) => f.num === 1).value), 31);
+  assert.notEqual(fp(requests[0]), fp(requests[1]));
+
+  const all = requests.flatMap((r) => messages(r));
+  for (const message of all) {
+    assert.match(stringField(message, 1), UUID); // message_id on every prompt
+    assert.equal(message.some((f) => f.num === 4), false); // no num_tokens
+    assert.equal(message.some((f) => f.num === 5), false); // no safe_for_code_telemetry
+  }
+  // The ephemeral cache breakpoint sits on the newest input message only.
+  const second = messages(requests[1]);
+  assert.equal(second[second.length - 1].some((f) => f.num === 8), true);
+  for (const message of second.slice(0, -1)) assert.equal(message.some((f) => f.num === 8), false);
 });
 
 test("does not replay signatures from another provider or model", async (t) => {
-  const requests = mockDevin(t);
+  const { requests } = mockDevin(t);
   await complete({ messages: [
     {role: "assistant", api: "anthropic-messages", provider: "anthropic", model: "other", content: [{type: "thinking", thinking: "foreign", thinkingSignature: "foreign-signature"}], timestamp: 1},
     {role: "assistant", api: "devin-local", provider: "devin", model: "other", content: [{type: "thinking", thinking: "other model", thinkingSignature: "sealed.v1.other"}], timestamp: 2},
@@ -310,7 +367,7 @@ test("does not replay signatures from another provider or model", async (t) => {
 });
 
 test("replays a signature-only redacted thinking block", async (t) => {
-  const requests = mockDevin(t, [Buffer.concat([encodeString(10, "sealed.v1.empty"), encodeVarintField(11, 1)]), encodeString(3, "OK")]);
+  const { requests } = mockDevin(t, [Buffer.concat([encodeString(10, "sealed.v1.empty"), encodeVarintField(11, 1)]), encodeString(3, "OK")]);
   const context = { messages: [] };
   const first = await complete(context);
   assert.equal(first.content[0].thinking, "");

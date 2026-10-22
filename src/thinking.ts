@@ -12,6 +12,7 @@
  */
 
 const TYPE_SEPARATOR = "\u001f";
+const MODEL_SEPARATOR = "\u001e";
 
 export interface ChatThinking {
   /** Thinking text as sent by the server (already summarized upstream). */
@@ -28,18 +29,29 @@ export function signatureTypeOf(signature: string): string {
   return signature.startsWith("sealed.") ? "sealed" : "non-sealed";
 }
 
-/** Store `signature` in pi's `thinkingSignature` without losing the type. */
-export function packThinkingSignature(signature: string, signatureType?: string): string {
-  if (!signatureType || signatureType === signatureTypeOf(signature)) return signature;
-  return `${signatureType}${TYPE_SEPARATOR}${signature}`;
+/**
+ * Store `signature` in pi's `thinkingSignature` without losing the type or the
+ * variant that produced the reasoning. The model uid rides along so a replayed
+ * assistant message can still report its generation model (history field 22)
+ * after a session restore, when in-memory tracking is gone.
+ */
+export function packThinkingSignature(signature: string, signatureType?: string, modelUid?: string): string {
+  const body = modelUid ? `${signature}${MODEL_SEPARATOR}${modelUid}` : signature;
+  if (!signatureType || signatureType === signatureTypeOf(signature)) return body;
+  return `${signatureType}${TYPE_SEPARATOR}${body}`;
 }
 
 export function unpackThinkingSignature(value: string | undefined): {
   signature?: string;
   signatureType?: string;
+  modelUid?: string;
 } {
   if (!value) return {};
   const index = value.indexOf(TYPE_SEPARATOR);
-  if (index === -1) return { signature: value, signatureType: signatureTypeOf(value) };
-  return { signatureType: value.slice(0, index), signature: value.slice(index + 1) };
+  const body = index === -1 ? value : value.slice(index + 1);
+  const split = body.lastIndexOf(MODEL_SEPARATOR);
+  const signature = split === -1 ? body : body.slice(0, split);
+  const modelUid = split === -1 ? undefined : body.slice(split + 1) || undefined;
+  if (index === -1) return { signature, signatureType: signatureTypeOf(signature), modelUid };
+  return { signatureType: value.slice(0, index), signature, modelUid };
 }

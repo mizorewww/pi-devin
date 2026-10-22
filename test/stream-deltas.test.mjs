@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { setImmediate } from "node:timers/promises";
 import { streamDevin } from "../src/stream.ts";
-import { clearCachedUserJwt } from "../src/jwt.ts";
 import { encodeMessage, encodeString, encodeTag, encodeVarintField, frameConnectStream } from "../src/wire.ts";
 
 const model = {
@@ -13,12 +12,7 @@ const model = {
 };
 
 async function run(t, frames, expectedError = false) {
-  clearCachedUserJwt();
-  t.after(clearCachedUserJwt);
   t.mock.method(globalThis, "fetch", async (url) => {
-    if (url === "https://devin.invalid/exa.auth_pb.AuthService/GetUserJwt") {
-      return new Response(encodeString(1, "eyJtest.jwt"));
-    }
     assert.equal(url, "https://devin.invalid/exa.api_server_pb.ApiServerService/GetChatMessage");
     const chunks = [...frames.map((frame) => frameConnectStream(frame, false)), Buffer.from([2, 0, 0, 0, 2, 123, 125])];
     return new Response(new ReadableStream({

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeContext } from "@earendil-works/pi-ai";
-import { clearCachedUserJwt } from "../src/jwt.ts";
 import { streamDevin } from "../src/stream.ts";
 import { encodeMessage } from "../src/wire.ts";
 
@@ -20,9 +19,6 @@ const model = {
 const user = (content) => ({ role: "user", content, timestamp: 1 });
 
 test("aborting an in-flight stream reports aborted without leaking a rejection", async (t) => {
-  clearCachedUserJwt();
-  t.after(clearCachedUserJwt);
-
   const rejections = [];
   const onRejection = (reason) => rejections.push(reason);
   process.on("unhandledRejection", onRejection);
@@ -30,9 +26,6 @@ test("aborting an in-flight stream reports aborted without leaking a rejection",
 
   const ac = new AbortController();
   t.mock.method(globalThis, "fetch", async (url, options) => {
-    if (url === "https://devin.invalid/exa.auth_pb.AuthService/GetUserJwt") {
-      return new Response(encodeMessage(1, Buffer.from("eyJtest.jwt")));
-    }
     assert.equal(url, "https://devin.invalid/exa.api_server_pb.ApiServerService/GetChatMessage");
     // Mirror undici: an aborted fetch errors the response body with signal.reason.
     const body = new ReadableStream({
@@ -72,12 +65,8 @@ test("real fetch cancellation after a response chunk leaves the process usable",
   const { createServer } = await import("node:http");
   const { once } = await import("node:events");
   const { encodeString, encodeVarintField, frameConnectStream } = await import("../src/wire.ts");
-  clearCachedUserJwt(); t.after(clearCachedUserJwt);
   let chats = 0;
   const server = createServer((req, res) => {
-    if (req.url.endsWith("/GetUserJwt")) {
-      res.end(encodeString(1, "eyJtest.jwt")); return;
-    }
     chats++;
     res.writeHead(200, { "Content-Type": "application/connect+proto" });
     res.write(frameConnectStream(encodeString(3, "started"), false));
@@ -108,9 +97,7 @@ for (const mode of ['idle', 'socket-close', 'eos-open']) {
     const { createServer } = await import('node:http');
     const { once } = await import('node:events');
     const { encodeString, frameConnectStream } = await import('../src/wire.ts');
-    clearCachedUserJwt(); t.after(clearCachedUserJwt);
     const server = createServer((req, res) => {
-      if (req.url.endsWith('/GetUserJwt')) { res.end(encodeString(1, 'eyJtest.jwt')); return; }
       res.writeHead(200, {'Content-Type': 'application/connect+proto'});
       res.write(frameConnectStream(encodeString(3, 'started'), false));
       if (mode === 'socket-close') setTimeout(() => res.destroy(), 10);

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as zlib from "node:zlib";
 import {
   type Api,
@@ -11,9 +11,8 @@ import {
   createAssistantMessageEventStream,
   parseStreamingJson,
 } from "@earendil-works/pi-ai";
-import { mapContextToChat, type ChatHistoryItem, type ContentPart, type ToolDef } from "./context-map.js";
-import { getCachedUserJwt } from "./jwt.js";
-import { buildMetadata } from "./metadata.js";
+import { mapContextToChat, rememberGenerationModel, type ChatHistoryItem, type ContentPart, type ToolDef } from "./context-map.js";
+import { buildMetadata, ensureClientVersion } from "./metadata.js";
 import { resolveModelUid } from "./models.js";
 import { packThinkingSignature, unpackThinkingSignature, type ChatThinking } from "./thinking.js";
 import {
@@ -81,21 +80,29 @@ function encodeChatMessagePrompt(
     toolResultIsError?: boolean;
     toolCalls?: Array<{ id: string; name: string; arguments: string }>;
     thinking?: ChatThinking;
+    /** Assistant replay: uid of the variant that produced this message (field 22). */
+    generationModel?: string;
+    /** Ephemeral cache breakpoint; the CLI marks only the current input message. */
+    cacheBreakpoint?: boolean;
   },
 ): Buffer {
   const text = content
     .filter((part) => part.type === "text")
     .map((part) => part.text ?? "")
     .join("\n");
+  // The CLI sends message_id(1) + source(2) + prompt(3) and nothing else; it
+  // does not send num_tokens(4) or safe_for_code_telemetry(5).
   const parts: Buffer[] = [
+    encodeString(1, randomUUID()),
     encodeVarintField(2, source),
     encodeString(3, text),
-    encodeVarintField(4, Math.max(1, Math.floor(text.length / 4))),
-    encodeVarintField(5, 1),
   ];
-  if (opts?.toolResultIsError) parts.push(encodeVarintField(9, 1));
-  if (opts?.toolCallId) parts.push(encodeString(7, opts.toolCallId));
   for (const tc of opts?.toolCalls ?? []) parts.push(encodeMessage(6, encodeChatToolCall(tc)));
+  if (opts?.toolCallId) parts.push(encodeString(7, opts.toolCallId));
+  // 8 prompt_cache_options = {type: EPHEMERAL(1)} — a breakpoint on the newest
+  // input, so the server can reuse the cached prefix up to this message.
+  if (opts?.cacheBreakpoint) parts.push(encodeMessage(8, encodeVarintField(1, 1)));
+  if (opts?.toolResultIsError) parts.push(encodeVarintField(9, 1));
   for (const img of content.filter((part) => part.type === "image")) {
     parts.push(encodeMessage(10, encodeImageData(img)));
   }
@@ -107,6 +114,7 @@ function encodeChatMessagePrompt(
     if (opts.thinking.redacted) parts.push(encodeVarintField(13, 1));
     if (opts.thinking.signatureType) parts.push(encodeString(18, opts.thinking.signatureType));
   }
+  if (opts?.generationModel) parts.push(encodeString(22, opts.generationModel));
   return Buffer.concat(parts);
 }
 
@@ -133,6 +141,8 @@ function encodeTrajectoryReference(trajectoryId: string): Buffer {
 }
 
 function encodeToolDef(tool: ToolDef): Buffer {
+  // No truncation here — a size cap on descriptions lives in mapContextToChat
+  // so payload hooks see the same text that goes on the wire.
   return Buffer.concat([
     encodeString(1, tool.name),
     encodeString(2, tool.description),
@@ -142,23 +152,15 @@ function encodeToolDef(tool: ToolDef): Buffer {
 
 function buildGetChatMessageRequest(args: {
   apiKey: string;
-  userJwt: string;
   payload: DevinPayload;
   cascadeId: string;
   trajectoryId: string;
-  sessionId: string;
-  requestId: bigint;
-  triggerId: string;
+  sessionSlug: string;
 }): Buffer {
   const { payload } = args;
-  const metadata = buildMetadata({
-    apiKey: args.apiKey,
-    userJwt: args.userJwt,
-    sessionId: args.sessionId,
-    requestId: args.requestId,
-    triggerId: args.triggerId,
-  });
-  const prompts = payload.messages.map((message) =>
+  const metadata = buildMetadata({ apiKey: args.apiKey });
+  const lastIndex = payload.messages.length - 1;
+  const prompts = payload.messages.map((message, index) =>
     encodeMessage(
       3,
       encodeChatMessagePrompt(normalizeContent(message.content), SOURCE_BY_ROLE[message.role], {
@@ -166,6 +168,8 @@ function buildGetChatMessageRequest(args: {
         toolResultIsError: message.role === "tool" ? message.tool_result_is_error : undefined,
         toolCalls: message.role === "assistant" ? message.tool_calls : undefined,
         thinking: message.role === "assistant" ? message.thinking : undefined,
+        generationModel: message.role === "assistant" ? message.generation_model : undefined,
+        cacheBreakpoint: index === lastIndex,
       }),
     ),
   );
@@ -182,6 +186,11 @@ function buildGetChatMessageRequest(args: {
     encodeString(16, args.cascadeId),
     encodeVarintField(20, 1),
     encodeString(21, payload.modelUid),
+    // 22 execution_id — a fresh uuid per inference call, as the CLI sends on
+    // agent turns (auxiliary calls like the titler omit it).
+    encodeString(22, randomUUID()),
+    // 28 — the session's petname slug ("jumpy-heat" style), stable per session.
+    encodeString(28, args.sessionSlug),
   ]);
 }
 
@@ -287,17 +296,49 @@ function decodeUsage(buf: Buffer): CloudChatEvent | null {
   };
 }
 
-const sessionCache = new Map<string, { sessionId: string; cascadeId: string; trajectoryId: string }>();
+// The CLI names each session "adjective-noun" (jumpy-heat, heavenly-cadmium)
+// and sends it on every agent request as field 28.
+const SLUG_ADJECTIVES = [
+  "amber", "ancient", "autumn", "bold", "brave", "bright", "brisk", "calm",
+  "clever", "crimson", "curious", "daring", "dawn", "eager", "ember", "faint",
+  "fancy", "fleet", "gentle", "golden", "grand", "happy", "hidden", "honest",
+  "icy", "jade", "jolly", "jumpy", "keen", "kind", "lively", "lucky",
+  "mellow", "mighty", "misty", "noble", "proud", "quick", "quiet", "rapid",
+  "scarlet", "silent", "silver", "sleek", "steady", "sunny", "swift", "tender",
+  "vivid", "warm", "wild", "wise", "witty", "young", "zesty", "zephyr",
+];
+const SLUG_NOUNS = [
+  "ash", "aurora", "badger", "bay", "bear", "brook", "cadmium", "canyon",
+  "cedar", "cliff", "cloud", "comet", "coral", "cove", "creek", "dune",
+  "falcon", "fern", "field", "finch", "fjord", "flame", "fox", "frost",
+  "gale", "glen", "grove", "harbor", "hawk", "heath", "heron", "isle",
+  "lake", "lark", "leaf", "mesa", "moon", "moss", "newt", "otter",
+  "owl", "peak", "pine", "pond", "rain", "reef", "ridge", "river",
+  "sage", "shore", "sky", "sparrow", "stone", "storm", "tide", "vale",
+  "wave", "wren", "yarrow", "zephyr",
+];
+
+function sessionSlug(seed: string): string {
+  const hash = createHash("sha256").update(seed).digest();
+  return `${SLUG_ADJECTIVES[hash[0] % SLUG_ADJECTIVES.length]}-${SLUG_NOUNS[hash[1] % SLUG_NOUNS.length]}`;
+}
+
+const sessionCache = new Map<string, { cascadeId: string; trajectoryId: string; slug: string }>();
 
 function sessionIds(apiKey: string, host: string, sessionId?: string) {
   const key = createHash("sha256").update(`${host}\x1f${apiKey}\x1f${sessionId ?? randomUUID()}`).digest("hex");
   let ids = sessionCache.get(key);
   if (!ids) {
-    ids = { sessionId: randomUUID(), cascadeId: randomUUID(), trajectoryId: randomUUID() };
+    ids = { cascadeId: randomUUID(), trajectoryId: randomUUID(), slug: sessionSlug(key) };
     if (sessionCache.size >= 256) sessionCache.delete(sessionCache.keys().next().value!);
     sessionCache.set(key, ids);
   }
   return ids;
+}
+
+/** Sentry traceparent header, same shape the CLI emits on its chat calls. */
+function sentryTrace(): string {
+  return `${randomBytes(16).toString("hex")}-${randomBytes(8).toString("hex")}-0`;
 }
 
 async function* streamChatEvents(args: {
@@ -308,28 +349,35 @@ async function* streamChatEvents(args: {
   sessionId?: string;
 }): AsyncGenerator<CloudChatEvent> {
   const host = args.host.replace(/\/$/, "");
-  const userJwt = await getCachedUserJwt(args.apiKey, host, args.signal);
+  // Match the CLI's version in Metadata before the first request goes out.
+  await ensureClientVersion();
+  args.signal?.throwIfAborted();
   const ids = sessionIds(args.apiKey, host, args.sessionId);
   const proto = buildGetChatMessageRequest({
     apiKey: args.apiKey,
-    userJwt,
     payload: args.payload,
     cascadeId: ids.cascadeId,
     trajectoryId: ids.trajectoryId,
-    sessionId: ids.sessionId,
-    requestId: BigInt(Date.now()),
-    triggerId: randomUUID(),
+    sessionSlug: ids.slug,
   });
 
+  // The CLI gzips large Connect frames (a ~22 KB agent request arrives
+  // compressed; a ~1.6 KB auxiliary one does not) — no benefit below ~2 KB.
+  const compress = proto.length > 2_048;
+  const headers: Record<string, string> = {
+    // The CLI authenticates with `Authorization: Basic <apiKey>-<apiKey>` and
+    // carries no user_jwt in Metadata — there is no JWT mint on this path.
+    Authorization: `Basic ${args.apiKey}-${args.apiKey}`,
+    "Content-Type": "application/connect+proto",
+    "Connect-Protocol-Version": "1",
+    "Accept-Encoding": "gzip",
+    "Sentry-Trace": sentryTrace(),
+  };
+  if (compress) headers["Connect-Content-Encoding"] = "gzip";
   const resp = await fetch(`${host}/exa.api_server_pb.ApiServerService/GetChatMessage`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/connect+proto",
-      "Connect-Protocol-Version": "1",
-      "Connect-Content-Encoding": "gzip",
-      "Connect-Accept-Encoding": "gzip",
-    },
-    body: new Uint8Array(frameConnectStream(proto, true)),
+    headers,
+    body: new Uint8Array(frameConnectStream(proto, compress)),
     signal: args.signal,
   });
   if (!resp.ok) {
@@ -566,7 +614,7 @@ export function streamDevin(
           const block = output.content[thinkingIndex];
           if (block.type === "thinking") {
             const prior = unpackThinkingSignature(block.thinkingSignature);
-            block.thinkingSignature = packThinkingSignature(event.signature ?? prior.signature ?? "", event.signatureType ?? prior.signatureType);
+            block.thinkingSignature = packThinkingSignature(event.signature ?? prior.signature ?? "", event.signatureType ?? prior.signatureType, payload.modelUid);
           }
         } else if (event.kind === "reasoning_redacted") {
           if (thinkingIndex < 0) {
@@ -618,6 +666,8 @@ export function streamDevin(
       signal.throwIfAborted();
       closeTools();
       if (toolStates.size && output.stopReason === "stop") output.stopReason = "toolUse";
+      // Replays of this message carry its generation variant (history field 22).
+      rememberGenerationModel(output, payload.modelUid);
       stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
       stream.end();
     } catch (error) {
