@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { syncBuiltinESMExports } from "node:module";
 import { catalogCachePath, writeCatalogCache } from "../src/catalog-cache.ts";
+import { encodeMessage, encodeString, encodeVarintField } from "../src/wire.ts";
 
 const directory = fs.mkdtempSync(join(tmpdir(), "pi-devin-catalog-test-"));
 after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -34,6 +35,13 @@ function setup(t) {
   t.mock.method(fs, "readFileSync", (path, ...args) => isCredentials(path) ? 'api_key = "synthetic-test-key"\n' : read(path, ...args));
   t.mock.method(fs, "existsSync", (path) => isCredentials(path) || exists(path));
   t.mock.method(console, "warn", () => {});
+  // The provider augments the catalog via GetCliModelConfigs (unary
+  // application/proto): answer it locally so tests never reach the network.
+  const capabilities = encodeMessage(1, Buffer.concat([encodeString(22, "test-high"), encodeVarintField(5, 1)]));
+  t.mock.method(globalThis, "fetch", async (url) => {
+    if (!String(url).includes("GetCliModelConfigs")) throw new Error(`unexpected fetch: ${url}`);
+    return new Response(capabilities);
+  });
   syncBuiltinESMExports();
   const registrations = [], hooks = {}, commands = {};
   const pi = { registerProvider: (_id, config) => registrations.push(config), on: (name, fn) => hooks[name] = fn, registerCommand: (name, command) => commands[name] = command };
@@ -64,10 +72,12 @@ test("malformed cached cost data cannot prevent provider and command registratio
   assert.ok(x.commands["devin-refresh"]); assert.equal(x.calls(), 0);
 });
 
-test("cold startup loads and caches the CLI catalog", async (t) => {
+test("cold startup loads and caches the CLI catalog with server capabilities", async (t) => {
   const x = setup(t); await extension(x.pi);
   assert.equal(x.calls(), 1); assert.equal(x.registrations.at(-1).models[0].id, "test");
-  assert.deepEqual(JSON.parse(fs.readFileSync(x.path, "utf8")).catalog, catalog);
+  const written = JSON.parse(fs.readFileSync(x.path, "utf8")).catalog;
+  assert.equal(written.families[0].variants[0].supports_images, true);
+  assert.deepEqual(x.registrations.at(-1).models[0].input, ["text", "image"]);
 });
 
 test("stale cache shares its background request with manual refresh", async (t) => {

@@ -1,6 +1,7 @@
 import type { ThinkingLevelMap } from "@earendil-works/pi-ai";
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import { runDevin } from "./cli.js";
+import type { ClientModelCapabilities } from "./model-configs.js";
 
 export interface DevinVariant {
   model_uid: string;
@@ -11,6 +12,13 @@ export interface DevinVariant {
   cost_summary?: string;
   is_new?: boolean;
   is_beta?: boolean;
+  /**
+   * Server-reported image support, merged in from GetCliModelConfigs by
+   * applyModelCapabilities. Absent when capability data was not fetched
+   * (offline) or the variant has no ClientModelConfig entry (routers like
+   * adaptive/fusion).
+   */
+  supports_images?: boolean;
 }
 
 export interface DevinFamily {
@@ -125,6 +133,13 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
     if (thinkingLevelMap[level] === undefined) thinkingLevelMap[level] = null;
   }
 
+  // Modalities come from the server's per-variant supports_images flag, not a
+  // hardcoded list. An explicit false on any shipped variant marks the family
+  // text-only (in practice the flag is uniform within a family); variants that
+  // carry no capability data keep the permissive default so a failed lookup
+  // cannot silently disable working image input.
+  const supportsImages = !source.some((variant) => variant.supports_images === false);
+
   const defaultUid = preferredDefault(thinkingLevelMap) ?? source[0]?.model_uid ?? family.family_uid;
   const sample = source.find((variant) => variant.model_uid === defaultUid) ?? source[0];
   if (!sample) return [];
@@ -143,7 +158,7 @@ function familyToModels(family: DevinFamily): ProviderModelConfig[] {
       name: family.family_label || family.slug || defaultUid,
       reasoning,
       thinkingLevelMap,
-      input: ["text", "image"],
+      input: supportsImages ? ["text", "image"] : ["text"],
       cost: parseCost(sample.cost_summary),
       contextWindow: sample.max_context_tokens ?? 256_000,
       maxTokens: sample.max_output_tokens ?? 128_000,
@@ -156,6 +171,25 @@ export const FALLBACK_MODELS: ProviderModelConfig[] = [];
 
 export function modelsFromCatalog(catalog: DevinCatalog | null): ProviderModelConfig[] {
   return catalog?.families?.flatMap(familyToModels) ?? [];
+}
+
+/**
+ * Stamp each variant with the server's supports_images flag, keyed by
+ * model_uid. Variants without a ClientModelConfig entry (routers) are left
+ * unset. Mutates and returns the catalog so the enriched flags land in the
+ * cache alongside the CLI data.
+ */
+export function applyModelCapabilities(
+  catalog: DevinCatalog,
+  capabilities: ReadonlyMap<string, ClientModelCapabilities>,
+): DevinCatalog {
+  for (const family of catalog.families ?? []) {
+    for (const variant of family.variants ?? []) {
+      const capability = capabilities.get(variant.model_uid);
+      if (capability) variant.supports_images = capability.supportsImages;
+    }
+  }
+  return catalog;
 }
 
 export async function loadCliCatalog(): Promise<DevinCatalog | null> {

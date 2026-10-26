@@ -10,7 +10,8 @@ import {
   readCatalogCache,
   writeCatalogCache,
 } from "../src/catalog-cache.js";
-import { FALLBACK_MODELS, loadCliCatalog, modelsFromCatalog } from "../src/models.js";
+import { FALLBACK_MODELS, applyModelCapabilities, loadCliCatalog, modelsFromCatalog } from "../src/models.js";
+import { fetchClientModelCapabilities } from "../src/model-configs.js";
 import { CLIENT_IDE, ensureClientVersion } from "../src/metadata.js";
 import { streamDevin } from "../src/stream.js";
 
@@ -27,9 +28,25 @@ function isOffline(): boolean {
 
 function refreshCatalog(pi: ExtensionAPI): Promise<ProviderModelConfig[]> {
   if (!catalogRequest) {
-    const pending = loadCliCatalog().then((catalog) => {
+    const pending = loadCliCatalog().then(async (catalog) => {
       if (!isUsableCatalog(catalog)) {
         throw new Error("Devin CLI returned no usable model families");
+      }
+      // The CLI's JSON omits supports_images; recover it from the server's
+      // GetCliModelConfigs (same auth/credentials) so families that cannot
+      // take images stop advertising them. Best-effort: a failed lookup keeps
+      // the permissive per-variant default.
+      const creds = readCredentials();
+      if (creds) {
+        try {
+          const capabilities = await fetchClientModelCapabilities({
+            apiKey: creds.apiKey,
+            host: creds.apiServerUrl,
+          });
+          applyModelCapabilities(catalog, capabilities);
+        } catch (error) {
+          console.warn(`Devin: model capability lookup failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
       }
       const models = modelsFromCatalog(catalog);
       try {

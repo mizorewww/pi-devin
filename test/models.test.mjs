@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { modelsFromCatalog, resolveModelUid } from '../src/models.ts';
+import { applyModelCapabilities, modelsFromCatalog, resolveModelUid } from '../src/models.ts';
 const family = (variants) => ({ families: [{ family_label: 'Test', family_uid: 'test', slug: 'test.family', variants }] });
 
 test('parses current CLI prices without inventing cache rates', () => {
@@ -55,6 +55,39 @@ test('excludes -lightning variants instead of mapping them to off', () => {
   assert.equal(m.thinkingLevelMap.max, 'swe-2-max');
   assert.equal(m.thinkingLevelMap.off, null);
   assert.equal(m.thinkingLevelMap.low, null);
+});
+
+test('derives image input from supports_images instead of hardcoding it', () => {
+  const [vision] = modelsFromCatalog(family([{ model_uid: 'vis-high', label: 'Vis High', supports_images: true }]));
+  assert.deepEqual(vision.input, ['text', 'image']);
+  const [text] = modelsFromCatalog(family([{ model_uid: 'txt-high', label: 'Txt High', supports_images: false }]));
+  assert.deepEqual(text.input, ['text']);
+  // Missing capability data stays permissive so a failed lookup cannot
+  // disable image input that previously worked.
+  const [unknown] = modelsFromCatalog(family([{ model_uid: 'unk-high', label: 'Unk High' }]));
+  assert.deepEqual(unknown.input, ['text', 'image']);
+  const [mixed] = modelsFromCatalog(family([
+    { model_uid: 'mix-high', label: 'Mix High', supports_images: true },
+    { model_uid: 'mix-max', label: 'Mix Max', supports_images: false },
+  ]));
+  assert.deepEqual(mixed.input, ['text']);
+});
+
+test('applyModelCapabilities stamps supports_images by model_uid', () => {
+  const catalog = family([
+    { model_uid: 'a-high', label: 'A High' },
+    { model_uid: 'b-high', label: 'B High' },
+    { model_uid: 'router', label: 'Router' },
+  ]);
+  applyModelCapabilities(catalog, new Map([
+    ['a-high', { supportsImages: true }],
+    ['b-high', { supportsImages: false }],
+  ]));
+  const variants = catalog.families[0].variants;
+  assert.equal(variants[0].supports_images, true);
+  assert.equal(variants[1].supports_images, false);
+  assert.equal(variants[2].supports_images, undefined);
+  assert.equal(catalog.families[0].variants.length, 3);
 });
 
 test('does not advertise a hardcoded cloud catalog when offline or empty', () => {

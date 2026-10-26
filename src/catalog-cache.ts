@@ -50,6 +50,7 @@ export function isUsableCatalog(value: unknown): value is DevinCatalog {
       && optionalTokenLimit(variant.max_output_tokens)
       && (variant.is_new === undefined || typeof variant.is_new === "boolean")
       && (variant.is_beta === undefined || typeof variant.is_beta === "boolean")
+      && (variant.supports_images === undefined || typeof variant.supports_images === "boolean")
     )
   );
 }

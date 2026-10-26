@@ -22,6 +22,7 @@ src/context-map.ts    # Pi Context → Cognition chat history (+ system prompt f
 
 - `/login devin` must call `devin auth login` when no local credential exists. Reusing the session token a signed-in Devin Desktop already stores on disk is allowed; a custom paste/device flow is not.
 - Model IDs must come from `devin models list`, not a hardcoded cloud allowlist.
+- `input` modalities are not hardcoded either: the CLI's catalog JSON drops `ClientModelConfig.supports_images`, so `src/model-configs.ts` reads it from `GetCliModelConfigs` (the same endpoint `devin models list` renders) and `applyModelCapabilities` merges it onto catalog variants by `model_uid`. Variants with no server flag (routers like `adaptive`/`fusion`, or a failed lookup) keep the permissive `["text", "image"]` default.
 - One pi model per Devin family: the id is the family slug and pi's thinking level picks the variant (`swe-2` + `max` → `swe-2-max`). Never bake a level into the model id.
 - Levels a family does not ship must be `null` in `thinkingLevelMap`, so pi hides them instead of silently falling back. Paid-tier suffixes (`-priority`, `-fast`, `-lightning`) are excluded from thinking levels entirely — they are separate SKUs, not thinking variants.
 - Auth mirrors the Devin CLI: `Authorization: Basic <apiKey>-<apiKey>` (the session token doubled with a hyphen) plus a `sentry-trace` header. The CLI never calls `GetUserJwt` — neither does this package; there is no JWT mint anywhere.
