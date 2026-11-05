@@ -69,7 +69,7 @@ function userContent(content: Message["content"]): string | ContentPart[] {
   return parts;
 }
 
-export function mapContextToChat(context: TranscriptContext, modelId?: string): MappedChat {
+export function mapContextToChat(context: TranscriptContext): MappedChat {
   // Fold later system updates into the single prompt sent separately to Devin.
   const transcript = collapseSystemMessages(context);
   const systemPrompt = getCurrentSystemPrompt(transcript.messages);
@@ -84,7 +84,27 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
       const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
       let thinking: ChatThinking | undefined;
       let generationModel: string | undefined = generationModelUidByMessage.get(message);
-      for (const part of message.content) {
+      // Devin thinking replays verbatim on the wire: the summary rides field 11
+      // and signature/type attach only when the server minted them (models like
+      // swe-2-flash return unsigned reasoning that still replays on that slot).
+      // The Devin CLI does not filter by generation model — a signed or unsigned
+      // trace replays even when the current family differs — so neither do we.
+      const devin = message.provider === "devin" && message.api === "devin-local";
+      const thinkingIndexes = devin
+        ? message.content.map((part, index) => (part.type === "thinking" ? index : -1)).filter((index) => index >= 0)
+        : [];
+      const lastThinkingIndex = thinkingIndexes.at(-1) ?? -1;
+      // The slot carries one thinking per message. When the newest block is
+      // signed its signature seals that block alone, so earlier fragments fall
+      // back to inlined text; when it is unsigned the fragments merge the same
+      // way the CLI merges a message's thinking into a single unsigned slot.
+      const lastPart = lastThinkingIndex >= 0 ? message.content[lastThinkingIndex] : undefined;
+      const signedLast = lastPart?.type === "thinking"
+        ? Boolean(unpackThinkingSignature(lastPart.thinkingSignature).signature)
+        : false;
+      const anyRedacted = message.content.some((part) => part.type === "thinking" && part.redacted);
+      const unsignedFragments: string[] = [];
+      message.content.forEach((part, index) => {
         if (part.type === "text") texts.push(part.text);
         if (part.type === "toolCall") {
           toolCalls.push({
@@ -94,27 +114,28 @@ export function mapContextToChat(context: TranscriptContext, modelId?: string): 
           });
         }
         if (part.type === "thinking") {
+          if (!devin) {
+            // A foreign provider's reasoning cannot ride Devin's thinking slot;
+            // keep it visible to the model as ordinary transcript text instead.
+            if (part.thinking) texts.push(`<thinking>\n${part.thinking}\n</thinking>`);
+            return;
+          }
           const decoded = unpackThinkingSignature(part.thinkingSignature);
-          // One thinking slot per message on the wire, and an unsigned trace is
-          // not replayable — keep the newest block that the server can verify.
-          if (decoded.signature && message.provider === "devin" && message.api === "devin-local"
-            && (!modelId || message.model === modelId)) {
-            thinking = {
-              text: part.thinking,
-              signature: decoded.signature,
-              signatureType: decoded.signatureType,
-              redacted: part.redacted,
-            };
-            generationModel ??= decoded.modelUid;
-          } else if (part.thinking) {
-            // Not replayable in the signed slot — a foreign provider's plain
-            // reasoning, an unsigned trace, or a different Devin family.
-            // Silently dropping it loses whatever the reasoning concluded, so
-            // keep it visible to the model as ordinary assistant text instead.
-            texts.push(`<thinking>\n${part.thinking}\n</thinking>`);
+          generationModel ??= decoded.modelUid;
+          if (index === lastThinkingIndex) {
+            thinking = signedLast
+              ? { text: part.thinking, signature: decoded.signature, signatureType: decoded.signatureType, redacted: part.redacted }
+              : {
+                  text: [...unsignedFragments, part.thinking].filter(Boolean).join("\n"),
+                  redacted: anyRedacted || undefined,
+                };
+          } else if (signedLast) {
+            if (part.thinking) texts.push(`<thinking>\n${part.thinking}\n</thinking>`);
+          } else {
+            unsignedFragments.push(part.thinking);
           }
         }
-      }
+      });
       messages.push({
         role: "assistant",
         content: texts.join("\n"),

@@ -17,8 +17,12 @@ const MODEL_SEPARATOR = "\u001e";
 export interface ChatThinking {
   /** Thinking text as sent by the server (already summarized upstream). */
   text: string;
-  /** Opaque signature for server-side verification/continuation. */
-  signature: string;
+  /**
+   * Opaque signature for server-side verification/continuation. Absent for
+   * models whose reasoning arrives unsigned (e.g. swe-2-flash) — the wire
+   * still carries the thinking text on its own slot, just without 12/18.
+   */
+  signature?: string;
   /** `signature_type` reported by the server. */
   signatureType?: string;
   /** Server flagged the trace as redacted by safety filters. */

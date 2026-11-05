@@ -108,9 +108,11 @@ function encodeChatMessagePrompt(
   }
   // 11 thinking / 12 signature / 13 thinking_redacted / 18 signature_type — the
   // same quartet the Devin CLI replays so the model keeps its own reasoning.
+  // Unsigned traces (swe-2-flash and friends) still ride field 11; only the
+  // signature fields stay home when the server never minted one.
   if (opts?.thinking) {
     parts.push(encodeString(11, opts.thinking.text));
-    parts.push(encodeString(12, opts.thinking.signature));
+    if (opts.thinking.signature) parts.push(encodeString(12, opts.thinking.signature));
     if (opts.thinking.redacted) parts.push(encodeVarintField(13, 1));
     if (opts.thinking.signatureType) parts.push(encodeString(18, opts.thinking.signatureType));
   }
@@ -555,7 +557,7 @@ export function streamDevin(
       if (!apiKey) throw new Error("No Devin credentials. Run /login devin (uses the local Devin CLI).");
       const host = (options?.env?.DEVIN_API_SERVER_URL || "https://server.codeium.com").replace(/\/$/, "");
       const modelUid = resolveModelUid(model.id, model.thinkingLevelMap, options?.reasoning);
-      const mapped = mapContextToChat(context, model.id);
+      const mapped = mapContextToChat(context);
       let payload: DevinPayload = {
         system: mapped.systemPrompt,
         messages: mapped.messages,
@@ -667,6 +669,13 @@ export function streamDevin(
       closeTools();
       if (toolStates.size && output.stopReason === "stop") output.stopReason = "toolUse";
       // Replays of this message carry its generation variant (history field 22).
+      // Unsigned thinking gets no signature blob, so pack the variant uid alone
+      // the same way — a restored session can still name generation_model.
+      for (const block of output.content) {
+        if (block.type !== "thinking") continue;
+        const decoded = unpackThinkingSignature(block.thinkingSignature);
+        block.thinkingSignature = packThinkingSignature(decoded.signature ?? "", decoded.signatureType, payload.modelUid);
+      }
       rememberGenerationModel(output, payload.modelUid);
       stream.push({ type: "done", reason: output.stopReason as "stop" | "length" | "toolUse", message: output });
       stream.end();

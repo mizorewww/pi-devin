@@ -357,18 +357,45 @@ test("matches the Devin CLI wire shape (headers, metadata, messages)", async (t)
   for (const message of second.slice(0, -1)) assert.equal(message.some((f) => f.num === 8), false);
 });
 
-test("does not replay signatures from another provider or model", async (t) => {
+test("inlines another provider's signature while replaying cross-family Devin thinking natively", async (t) => {
   const { requests } = mockDevin(t);
   await complete({ messages: [
     {role: "assistant", api: "anthropic-messages", provider: "anthropic", model: "other", content: [{type: "thinking", thinking: "foreign", thinkingSignature: "foreign-signature"}], timestamp: 1},
     {role: "assistant", api: "devin-local", provider: "devin", model: "other", content: [{type: "thinking", thinking: "other model", thinkingSignature: "sealed.v1.other"}], timestamp: 2},
   ]});
-  for (const message of messages(requests[0])) {
-    // The opaque signature itself never rides the wire...
-    assert.equal(message.some((f) => f.num === 12), false);
-    // ...but the reasoning it protected is inlined as visible text, not lost.
-    assert.match(stringField(message, 3), /<thinking>\n(foreign|other model)\n<\/thinking>/);
-  }
+  const [foreign, otherDevin] = messages(requests[0]);
+  // A foreign provider's reasoning never rides Devin's thinking slot — it is
+  // inlined as visible text so nothing is silently lost.
+  assert.equal(foreign.some((f) => f.num === 11 || f.num === 12), false);
+  assert.match(stringField(foreign, 3), /<thinking>\nforeign\n<\/thinking>/);
+  // The Devin CLI replays stored thinking verbatim even across families — a
+  // signed swe-2 trace still goes back on 11/12 when the request targets
+  // swe-2-flash — so a different devin model keeps its signed slot.
+  assert.equal(stringField(otherDevin, 11), "other model");
+  assert.equal(stringField(otherDevin, 12), "sealed.v1.other");
+  assert.doesNotMatch(stringField(otherDevin, 3), /<thinking>/);
+});
+
+test("replays unsigned Devin thinking on field 11 without signature fields", async (t) => {
+  const { requests } = mockDevin(t, [
+    Buffer.concat([encodeString(9, "unsigned summary"), encodeVarintField(5, 0)]),
+    encodeString(3, "OK"),
+  ]);
+  const context = normalizeContext({ messages: [user("turn 1")] });
+  const first = await complete(context);
+  const thinking = first.content.find((part) => part.type === "thinking");
+  assert.equal(thinking.thinking, "unsigned summary");
+  // No signature minted — the packed blob still carries the generating variant.
+  assert.deepEqual(unpackThinkingSignature(thinking.thinkingSignature), {
+    signature: "", signatureType: "non-sealed", modelUid: "test-model",
+  });
+  context.messages.push(first, user("turn 2"));
+  await complete(context);
+  const assistant = messages(requests[1]).find((message) => message.find((f) => f.num === 2)?.value === 2n);
+  assert.equal(stringField(assistant, 11), "unsigned summary");
+  assert.equal(assistant.some((f) => f.num === 12 || f.num === 18), false);
+  assert.equal(stringField(assistant, 22), "test-model");
+  assert.doesNotMatch(stringField(assistant, 3), /<thinking>/);
 });
 
 test("inlines unsigned reasoning while replaying signed thinking natively", async (t) => {
@@ -394,6 +421,23 @@ test("inlines unsigned reasoning while replaying signed thinking natively", asyn
   const foreign = history[2];
   assert.equal(foreign.some((f) => f.num === 12), false);
   assert.equal(stringField(foreign, 3), "<thinking>\noss chain\n</thinking>\noss answer");
+});
+
+test("merges unsigned thinking fragments into one field 11 slot", async (t) => {
+  const { requests } = mockDevin(t);
+  await complete({ messages: [
+    { role: "assistant", api: "devin-local", provider: "devin", model: "swe-2-flash",
+      content: [
+        { type: "thinking", thinking: "first fragment" },
+        { type: "text", text: "answer" },
+        { type: "thinking", thinking: "second fragment" },
+      ], timestamp: 1 },
+  ]});
+  const assistant = messages(requests[0])[0];
+  assert.equal(stringField(assistant, 11), "first fragment\nsecond fragment");
+  assert.equal(assistant.some((f) => f.num === 12 || f.num === 18), false);
+  assert.equal(stringField(assistant, 3), "answer");
+  assert.doesNotMatch(stringField(assistant, 3), /<thinking>/);
 });
 
 test("replays a signature-only redacted thinking block", async (t) => {
